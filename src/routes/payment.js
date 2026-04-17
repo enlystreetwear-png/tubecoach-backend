@@ -1,5 +1,8 @@
 // src/routes/payment.js
-// Razorpay subscription handling
+// Razorpay payment handling with tiered pricing:
+// Month 1:   FREE
+// Month 2-4: ₹49/month  (intro offer, 3 months)
+// Month 5+:  ₹499/month (full price)
 
 const express  = require('express');
 const Razorpay = require('razorpay');
@@ -17,29 +20,102 @@ function getRazorpay() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PRICING LOGIC
+// Month 1  = free (trialActive)
+// Month 2-4 = ₹49   (monthsSinceJoin <= 4)
+// Month 5+  = ₹499
+// ─────────────────────────────────────────────────────────────────────────────
+function getPricingForUser(user) {
+  const joinedAt = user.createdAt ? new Date(user.createdAt) : new Date();
+  const now      = new Date();
+  const monthsSinceJoin = Math.floor(
+    (now - joinedAt) / (1000 * 60 * 60 * 24 * 30)
+  );
+  const paymentCount = user.paymentCount || 0;
+
+  // Month 1 — free trial (no payment needed)
+  if (monthsSinceJoin < 1) {
+    return { plan: 'trial', amount: 0, label: 'Free', monthsSinceJoin, paymentCount };
+  }
+
+  // Months 2-4 — intro offer ₹49 (first 3 payments)
+  if (paymentCount < 3) {
+    return { plan: 'intro', amount: 49, amountPaise: 4900, label: '₹49/month', monthsSinceJoin, paymentCount };
+  }
+
+  // Month 5+ — full price ₹499
+  return { plan: 'full', amount: 499, amountPaise: 49900, label: '₹499/month', monthsSinceJoin, paymentCount };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /payment/pricing
+// Returns what the current user should pay
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/pricing', requireAuth, async (req, res) => {
+  try {
+    const db       = getDb();
+    const userSnap = await db.collection('users').doc(req.user.uid).get();
+    const user     = userSnap.data();
+    const pricing  = getPricingForUser(user);
+
+    const trialDays = Math.floor(
+      (Date.now() - new Date(user.trialStart || user.createdAt).getTime()) / (1000 * 60 * 60 * 24)
+    );
+
+    res.json({
+      ...pricing,
+      isPremium:     user.isPremium || false,
+      trialActive:   !user.isPremium && trialDays < 30,
+      trialDaysLeft: Math.max(0, 30 - trialDays),
+      nextBillingDate: user.nextBillingDate || null,
+      cancelScheduled: user.cancelScheduled || false,
+      // Show what comes next after current plan
+      nextPlan: pricing.plan === 'intro' && pricing.paymentCount >= 2
+        ? { label: '₹499/month', note: 'Full price starts next month' }
+        : null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /payment/create-order
-// Creates a Razorpay order for ₹499/month
+// Creates Razorpay order with correct amount for this user
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/create-order', requireAuth, async (req, res) => {
   try {
-    const razorpay = getRazorpay();
+    const db       = getDb();
+    const userSnap = await db.collection('users').doc(req.user.uid).get();
+    const user     = userSnap.data();
+    const pricing  = getPricingForUser(user);
 
+    if (pricing.plan === 'trial') {
+      return res.status(400).json({ error: 'User is still in free trial period' });
+    }
+
+    const razorpay = getRazorpay();
     const order = await razorpay.orders.create({
-      amount:   49900,        // ₹499 in paise
+      amount:   pricing.amountPaise,
       currency: 'INR',
       receipt:  `receipt_${req.user.uid}_${Date.now()}`,
       notes: {
-        uid:   req.user.uid,
-        email: req.user.email,
-        plan:  'monthly_499',
+        uid:          req.user.uid,
+        email:        req.user.email,
+        plan:         pricing.plan,
+        amount:       pricing.amount,
+        paymentCount: pricing.paymentCount,
       },
     });
 
     res.json({
-      orderId:  order.id,
-      amount:   order.amount,
-      currency: order.currency,
-      keyId:    process.env.RAZORPAY_KEY_ID,
+      orderId:      order.id,
+      amount:       order.amount,
+      currency:     order.currency,
+      keyId:        process.env.RAZORPAY_KEY_ID,
+      plan:         pricing.plan,
+      planLabel:    pricing.label,
+      paymentCount: pricing.paymentCount,
     });
   } catch (err) {
     console.error('Create order error:', err.message);
@@ -49,47 +125,68 @@ router.post('/create-order', requireAuth, async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /payment/verify
-// Razorpay calls this after successful payment
+// Verify Razorpay payment signature and activate premium
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/verify', requireAuth, async (req, res) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount, plan } = req.body;
 
     // Verify signature
     const hmac = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
     hmac.update(`${razorpay_order_id}|${razorpay_payment_id}`);
-    const expectedSignature = hmac.digest('hex');
+    const expectedSig = hmac.digest('hex');
 
-    if (expectedSignature !== razorpay_signature) {
+    if (expectedSig !== razorpay_signature) {
       return res.status(400).json({ error: 'Invalid payment signature' });
     }
 
-    // Mark user as premium in Firestore
-    const db = getDb();
+    const db  = getDb();
     const now = new Date();
     const nextBilling = new Date(now);
     nextBilling.setMonth(nextBilling.getMonth() + 1);
 
+    // Get current payment count
+    const userSnap     = await db.collection('users').doc(req.user.uid).get();
+    const userData     = userSnap.data();
+    const paymentCount = (userData.paymentCount || 0) + 1;
+
+    // Determine next month's price
+    const nextPricing = getPricingForUser({ ...userData, paymentCount });
+
     await db.collection('users').doc(req.user.uid).update({
       isPremium:         true,
-      subscriptionStart: now.toISOString(),
+      trialActive:       false,
+      paymentCount,
+      subscriptionStart: userData.subscriptionStart || now.toISOString(),
       nextBillingDate:   nextBilling.toISOString(),
       lastPaymentId:     razorpay_payment_id,
       lastOrderId:       razorpay_order_id,
+      lastPaymentAmount: amount,
+      lastPaymentPlan:   plan,
+      cancelScheduled:   false,
+      updatedAt:         now.toISOString(),
     });
 
     // Save payment record
     await db.collection('payments').add({
-      uid:        req.user.uid,
-      orderId:    razorpay_order_id,
-      paymentId:  razorpay_payment_id,
-      amount:     499,
-      currency:   'INR',
-      status:     'paid',
-      paidAt:     now.toISOString(),
+      uid:          req.user.uid,
+      orderId:      razorpay_order_id,
+      paymentId:    razorpay_payment_id,
+      amount:       amount || 49,
+      plan:         plan || 'intro',
+      currency:     'INR',
+      status:       'paid',
+      paidAt:       now.toISOString(),
+      paymentCount,
     });
 
-    res.json({ success: true, message: 'Payment verified! Welcome to TubeCoach Pro.' });
+    res.json({
+      success:       true,
+      message:       'Payment verified! Welcome to TubeCoach Pro.',
+      paymentCount,
+      nextAmount:    nextPricing.amount,
+      nextPlanLabel: nextPricing.label,
+    });
   } catch (err) {
     console.error('Verify payment error:', err.message);
     res.status(500).json({ error: err.message });
@@ -98,24 +195,27 @@ router.post('/verify', requireAuth, async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /payment/status
-// Check current subscription status
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/status', requireAuth, async (req, res) => {
   try {
-    const db      = getDb();
+    const db       = getDb();
     const userSnap = await db.collection('users').doc(req.user.uid).get();
-    const user    = userSnap.data();
+    const user     = userSnap.data();
+    const pricing  = getPricingForUser(user);
 
     const trialDays = Math.floor(
-      (Date.now() - new Date(user.trialStart).getTime()) / (1000 * 60 * 60 * 24)
+      (Date.now() - new Date(user.trialStart || user.createdAt).getTime()) / (1000 * 60 * 60 * 24)
     );
 
     res.json({
-      isPremium:       user.isPremium || false,
-      trialActive:     !user.isPremium && trialDays < 7,
-      trialDaysLeft:   Math.max(0, 7 - trialDays),
-      nextBillingDate: user.nextBillingDate || null,
+      isPremium:         user.isPremium || false,
+      trialActive:       !user.isPremium && trialDays < 30,
+      trialDaysLeft:     Math.max(0, 30 - trialDays),
+      nextBillingDate:   user.nextBillingDate || null,
       subscriptionStart: user.subscriptionStart || null,
+      cancelScheduled:   user.cancelScheduled || false,
+      currentPlan:       pricing.label,
+      paymentCount:      user.paymentCount || 0,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -124,14 +224,13 @@ router.get('/status', requireAuth, async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /payment/cancel
-// Cancel subscription (set isPremium to false after period ends)
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/cancel', requireAuth, async (req, res) => {
   try {
     const db = getDb();
     await db.collection('users').doc(req.user.uid).update({
       cancelledAt:     new Date().toISOString(),
-      cancelScheduled: true, // premium stays active till nextBillingDate
+      cancelScheduled: true,
     });
     res.json({ success: true, message: 'Subscription will cancel at end of billing period.' });
   } catch (err) {
