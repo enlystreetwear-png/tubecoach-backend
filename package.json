@@ -1,0 +1,25 @@
+{
+  "name": "tubecoach-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "trigger-weekly": "node -e \"require(\"./src/cron/weeklyJob\").runWeeklyJob()\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.89.0",
+    "axios": "^1.15.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "firebase-admin": "^13.8.0",
+    "google-auth-library": "^10.6.2",
+    "node-cron": "^4.2.1",
+    "razorpay": "^2.9.6"
+  }
+}
