@@ -22,20 +22,16 @@ function getOAuthClient() {
 // Redirects user to Google's consent screen
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/google', (req, res) => {
-  // Track if request came from mobile app
-  if (req.query.redirect === 'app') {
-    req.session = req.session || {};
-    req.session.isAppRedirect = true;
-  }
+  const isApp = req.query.redirect === 'app';
   const client = getOAuthClient();
   const url = client.generateAuthUrl({
-    access_type: 'offline',        // get refresh_token
+    access_type: 'offline',
     prompt: 'consent',
+    state: isApp ? 'app' : 'web',
     scope: [
       'openid',
       'email',
       'profile',
-      // YouTube scopes
       'https://www.googleapis.com/auth/youtube.readonly',
       'https://www.googleapis.com/auth/yt-analytics.readonly',
     ],
@@ -107,9 +103,9 @@ router.get('/google/callback', async (req, res) => {
       email:      profile.email,
     });
     // Check if this came from the mobile app
-    const isApp = req.session?.isAppRedirect || req.query.from === 'app';
+// Check if this came from the mobile app (via OAuth state parameter)
+    const isApp = req.query.state === 'app';
     if (isApp) {
-      // Deep link back into the app
       res.redirect(`tubecoach://callback?${params}`);
     } else {
       res.redirect(`${process.env.FRONTEND_URL}?${params}`);
