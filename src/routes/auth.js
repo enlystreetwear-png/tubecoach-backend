@@ -22,7 +22,7 @@ function getOAuthClient() {
 // Redirects user to Google's consent screen
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/google', (req, res) => {
-  const isApp = req.query.redirect === 'app';
+const isApp = req.query.state === 'app';
   const client = getOAuthClient();
   const url = client.generateAuthUrl({
     access_type: 'offline',
