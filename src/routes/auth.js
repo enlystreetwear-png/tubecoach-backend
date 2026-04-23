@@ -22,7 +22,7 @@ function getOAuthClient() {
 // Redirects user to Google's consent screen
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/google', (req, res) => {
-const isApp = req.query.state === 'app';
+  const isApp = req.query.state === 'app' || req.query.redirect === 'app';
   const client = getOAuthClient();
   const url = client.generateAuthUrl({
     access_type: 'offline',
@@ -103,7 +103,7 @@ router.get('/google/callback', async (req, res) => {
       email:      profile.email,
     });
     // Check if this came from the mobile app
-// Check if this came from the mobile app (via OAuth state parameter)
+    // Use OAuth state param to detect app vs web login
     const isApp = req.query.state === 'app';
     if (isApp) {
       res.redirect(`tubecoach://callback?${params}`);
