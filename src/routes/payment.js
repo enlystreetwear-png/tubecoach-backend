@@ -120,8 +120,10 @@ router.post('/create-order', requireAuth, async (req, res) => {
       paymentCount: pricing.paymentCount,
     });
   } catch (err) {
-    console.error('Create order error:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('Create order error:', err);
+    console.error('Razorpay key:', process.env.RAZORPAY_KEY_ID ? 'SET' : 'MISSING');
+    console.error('Razorpay secret:', process.env.RAZORPAY_KEY_SECRET ? 'SET' : 'MISSING');
+    res.status(500).json({ error: err.message || JSON.stringify(err) || 'Unknown error' });
   }
 });
 
