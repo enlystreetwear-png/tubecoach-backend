@@ -138,7 +138,7 @@ router.post('/verify', async (req, res) => {
     const trialDays = Math.floor(
       (Date.now() - new Date(user.trialStart).getTime()) / (1000 * 60 * 60 * 24)
     );
-    const trialActive = trialDays < 7;
+    const trialActive = trialDays < 30;
 
     res.json({
       uid:        user.uid,
@@ -149,7 +149,7 @@ router.post('/verify', async (req, res) => {
       channel:    user.channel,
       isPremium:  user.isPremium || trialActive,
       trialActive,
-      trialDaysLeft: Math.max(0, 7 - trialDays),
+      trialDaysLeft: Math.max(0, 30 - trialDays),
       onboarded:  user.onboarded,
       profile:    user.profile || null,
     });
