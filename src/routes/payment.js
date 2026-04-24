@@ -90,9 +90,10 @@ router.post('/create-order', requireAuth, async (req, res) => {
     const user     = userSnap.data();
     const pricing  = getPricingForUser(user);
 
-    if (pricing.plan === 'trial') {
-      return res.status(400).json({ error: 'User is still in free trial period' });
-    }
+    // Allow payment even during trial (user wants to pay early)
+    // if (pricing.plan === 'trial') {
+    //   return res.status(400).json({ error: 'User is still in free trial period' });
+    // }
 
     const razorpay = getRazorpay();
     const order = await razorpay.orders.create({
