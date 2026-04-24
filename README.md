@@ -231,3 +231,4 @@ This runs the Monday job immediately — useful for testing without waiting.
 - Firebase issues → https://console.firebase.google.com
 - Razorpay issues → https://dashboard.razorpay.com
 - Claude API → https://console.anthropic.com
+# force redeploy Fri Apr 24 17:08:13 IST 2026
