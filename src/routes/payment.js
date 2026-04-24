@@ -91,14 +91,14 @@ router.post('/create-order', requireAuth, async (req, res) => {
     const user     = userSnap.data();
     const pricing  = getPricingForUser(user);
 
-    // Allow payment even during trial (user wants to pay early)
-    // if (pricing.plan === 'trial') {
-    //   return res.status(400).json({ error: 'User is still in free trial period' });
-    // }
+    // If still in trial, charge intro price ₹49
+    const amountPaise = pricing.amountPaise || 4900;
+    const planLabel   = pricing.label === 'Free' ? '₹49/month' : pricing.label;
+    const planName    = pricing.plan === 'trial' ? 'intro' : pricing.plan;
 
     const razorpay = getRazorpay();
     const order = await razorpay.orders.create({
-      amount:   pricing.amountPaise,
+      amount:   amountPaise,
       currency: 'INR',
       receipt:  `receipt_${req.user.uid}_${Date.now()}`,
       notes: {
@@ -115,8 +115,8 @@ router.post('/create-order', requireAuth, async (req, res) => {
       amount:       order.amount,
       currency:     order.currency,
       keyId:        process.env.RAZORPAY_KEY_ID,
-      plan:         pricing.plan,
-      planLabel:    pricing.label,
+      plan:         planName,
+      planLabel:    planLabel,
       paymentCount: pricing.paymentCount,
     });
   } catch (err) {
