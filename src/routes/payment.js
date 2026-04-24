@@ -26,16 +26,17 @@ function getRazorpay() {
 // Month 5+  = ₹499
 // ─────────────────────────────────────────────────────────────────────────────
 function getPricingForUser(user) {
-  const joinedAt = user.createdAt ? new Date(user.createdAt) : new Date();
-  const now      = new Date();
-  const monthsSinceJoin = Math.floor(
-    (now - joinedAt) / (1000 * 60 * 60 * 24 * 30)
-  );
+  // Use trialStart to determine trial expiry (30 days)
+  const trialStart = user.trialStart ? new Date(user.trialStart) : new Date(user.createdAt || Date.now());
+  const now        = new Date();
+  const trialDays  = Math.floor((now - trialStart) / (1000 * 60 * 60 * 24));
+  const joinedAt   = user.createdAt ? new Date(user.createdAt) : new Date();
+  const monthsSinceJoin = Math.floor((now - joinedAt) / (1000 * 60 * 60 * 24 * 30));
   const paymentCount = user.paymentCount || 0;
 
-  // Month 1 — free trial (no payment needed)
-  if (monthsSinceJoin < 1) {
-    return { plan: 'trial', amount: 0, label: 'Free', monthsSinceJoin, paymentCount };
+  // Month 1 — free trial (30 days from trialStart)
+  if (trialDays < 30) {
+    return { plan: 'trial', amount: 0, label: 'Free', monthsSinceJoin, paymentCount, trialDaysLeft: 30 - trialDays };
   }
 
   // Months 2-4 — intro offer ₹49 (first 3 payments)
