@@ -320,9 +320,23 @@ router.get('/goal', requirePremium, async (req, res) => {
       }
     }
 
+    // Auto-detect if goal has been reached
+    const goalReached = currentSubs >= goalNum;
+
+    // Suggest next goal if current reached
+    function suggestNextGoal(current) {
+      const milestones = [100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000];
+      for (const m of milestones) {
+        if (m > current) return m;
+      }
+      return current * 2;
+    }
+
     res.json({
       current:      currentSubs,
       goal:         goalNum,
+      goalReached,
+      suggestedNextGoal: goalReached ? suggestNextGoal(currentSubs) : null,
       profile:      userData.profile,
       achievements: userData.achievements || [],
       goalJustSet:  userData.profile?.goalJustSet || false,
