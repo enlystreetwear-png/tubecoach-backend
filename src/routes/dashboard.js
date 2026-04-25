@@ -243,26 +243,37 @@ router.get('/analysis', requirePremium, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/chat', requirePremium, async (req, res) => {
   try {
-    const { messages } = req.body;
+    const { messages, taskContext, niche, lang } = req.body;
     if (!messages?.length) return res.status(400).json({ error: 'No messages' });
 
     const db      = getDb();
     const userSnap = await db.collection('users').doc(req.user.uid).get();
     const userData = userSnap.data();
 
-    const reply = await chatWithCoach({
-      messages,
-      user:    req.user,
-      channel: userData.channel,
-      profile: userData.profile,
+    // Check points
+    const weekKey = getWeekKey();
+    const lastReset = userData.pointsWeekKey || '';
+    let points = (lastReset !== weekKey) ? 50 : (userData.chatPoints ?? 50);
+    if (points < 5) return res.status(403).json({ error: 'Not enough points. Please recharge.' });
+
+    // Deduct points
+    const newPoints = Math.max(0, points - 5);
+    await db.collection('users').doc(req.user.uid).update({
+      chatPoints: newPoints,
+      pointsWeekKey: weekKey,
     });
 
-    // Save chat to Firestore
-    await db.collection('users').doc(req.user.uid)
-      .collection('chats')
-      .add({ messages, reply, createdAt: new Date().toISOString() });
+    const reply = await chatWithCoach({
+      messages,
+      user:        req.user,
+      channel:     userData.channel,
+      profile:     userData.profile,
+      taskContext, // restrict to task topic
+      niche:       niche || userData.profile?.niche,
+      lang:        lang || userData.profile?.lang,
+    });
 
-    res.json({ reply });
+    res.json({ reply, pointsLeft: newPoints });
   } catch (err) {
     console.error('Chat error:', err.message);
     res.status(500).json({ error: err.message });
@@ -567,6 +578,49 @@ router.post('/update-goal', requireAuth, async (req, res) => {
     res.json({ success: true, achievement: newAchievement });
   } catch (err) {
     console.error('Update goal error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /dashboard/chat-points — get user's current points
+// POST /dashboard/chat-points — update points after message
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/chat-points', requireAuth, async (req, res) => {
+  try {
+    const db = getDb();
+    const uid = req.user.uid;
+    const userSnap = await db.collection('users').doc(uid).get();
+    const userData = userSnap.data();
+
+    const WEEKLY_POINTS = 50;
+    const weekKey = getWeekKey();
+    const lastReset = userData.pointsWeekKey || '';
+    let points = userData.chatPoints;
+
+    // Reset points every week
+    if (lastReset !== weekKey || points === undefined || points === null) {
+      points = WEEKLY_POINTS;
+      await db.collection('users').doc(uid).update({
+        chatPoints: WEEKLY_POINTS,
+        pointsWeekKey: weekKey,
+      });
+    }
+
+    res.json({ points, weekKey });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/chat-points', requireAuth, async (req, res) => {
+  try {
+    const db = getDb();
+    const uid = req.user.uid;
+    const { points } = req.body;
+    await db.collection('users').doc(uid).update({ chatPoints: points });
+    res.json({ points });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

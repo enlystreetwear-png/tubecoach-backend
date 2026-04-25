@@ -236,22 +236,35 @@ JSON only:
 // ─────────────────────────────────────────────────────────────────────────────
 // AI Coach Chat
 // ─────────────────────────────────────────────────────────────────────────────
-async function chatWithCoach({ messages, user, channel, profile }) {
+async function chatWithCoach({ messages, user, channel, profile, taskContext, niche, lang }) {
   const client = getClient();
   const now    = new Date();
 
-  const systemPrompt = `You are TubeCoach, an expert YouTube growth assistant for Indian creators.
+  const taskSection = taskContext
+    ? `CURRENT TASK THE USER NEEDS HELP WITH:
+- Task: "${taskContext.title}"
+- Details: ${taskContext.detail || 'No additional details'}
+- Type: ${taskContext.type || 'general'}
+
+STRICT RULE: You MUST only answer questions related to this specific task. 
+If the user asks about something unrelated to this task, politely redirect them back to the task.
+Say something like: "I'm here to help you with '${taskContext.title}'. Let's stay focused on that! 😊"
+Do NOT answer questions about other topics, other tasks, or general YouTube advice outside this task context.`
+    : `Help with anything related to their YouTube growth.`;
+
+  const systemPrompt = `You are AITube Coach, an expert YouTube growth assistant for Indian creators.
 Today is ${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}.
 
 CREATOR:
 - Name: ${user.name}
 - Channel: "${channel?.title || 'their channel'}"
-- Niche: ${profile?.nicheDesc || profile?.niche || 'Content creation'}
-- Language: ${profile?.lang || 'Tamil'}
+- Niche: ${profile?.nicheDesc || niche || profile?.niche || 'Content creation'}
+- Language: ${lang || profile?.lang || 'Tamil'}
 - Subscribers: ${(channel?.subscribers || 0).toLocaleString()}
 - Goal: ${profile?.goal || '10,000 subscribers'}
 
-Help with: video ideas, scripts, SEO, thumbnails, titles, growth, algorithm, monetization.
+${taskSection}
+
 Be practical, specific, encouraging. Mention Indian context, prices in rupees.
 Keep responses to 3-5 sentences unless writing a full script or list.
 Never reference 2024 — use ${now.getFullYear()} context only.`;

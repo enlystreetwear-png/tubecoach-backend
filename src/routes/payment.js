@@ -242,4 +242,60 @@ router.post('/cancel', requireAuth, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /payment/recharge-order — create Razorpay order for points recharge
+// POST /payment/recharge-verify — verify and add points after payment
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/recharge-order', requireAuth, async (req, res) => {
+  try {
+    const razorpay = getRazorpay();
+    const order = await razorpay.orders.create({
+      amount:   1900, // ₹19 in paise
+      currency: 'INR',
+      receipt:  `rc_${Date.now().toString().slice(-10)}`,
+    });
+    res.json({
+      orderId: order.id,
+      amount:  order.amount,
+      currency: order.currency,
+      keyId:   process.env.RAZORPAY_KEY_ID,
+    });
+  } catch (err) {
+    console.error('Recharge order error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/recharge-verify', requireAuth, async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+    // Verify signature
+    const body = razorpay_order_id + '|' + razorpay_payment_id;
+    const expectedSig = require('crypto')
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(body)
+      .digest('hex');
+
+    if (expectedSig !== razorpay_signature) {
+      return res.status(400).json({ error: 'Invalid payment signature' });
+    }
+
+    // Add 50 points to user
+    const db = getDb();
+    const uid = req.user.uid;
+    const userSnap = await db.collection('users').doc(uid).get();
+    const userData = userSnap.data();
+    const currentPoints = userData.chatPoints || 0;
+    const newPoints = currentPoints + 50;
+
+    await db.collection('users').doc(uid).update({ chatPoints: newPoints });
+
+    res.json({ points: newPoints, added: 50 });
+  } catch (err) {
+    console.error('Recharge verify error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
