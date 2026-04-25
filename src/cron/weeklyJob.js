@@ -3,6 +3,15 @@
 // Fetches YouTube data + generates weekly plan for all premium users
 
 const cron = require('node-cron');
+const https = require('https');
+
+// Keep-alive ping every 10 minutes to prevent Railway cold starts
+function keepAlive() {
+  const url = process.env.RAILWAY_PUBLIC_DOMAIN || 'tubecoach-backend-production.up.railway.app';
+  https.get('https://'+url+'/health', (res) => {
+    console.log('[KeepAlive] Ping OK:', res.statusCode);
+  }).on('error', () => {});
+}
 const { getDb } = require('../config/firebase');
 const { getChannelStats, getRecentVideos, saveWeeklySnapshot, getSnapshots } = require('../services/youtube');
 const { generateWeeklyPlan } = require('../services/claude');
@@ -98,6 +107,9 @@ function startCron() {
   // Every Monday at 6:00 AM IST (UTC+5:30 = 00:30 UTC)
   cron.schedule('30 0 * * 1', runWeeklyJob, { timezone: 'Asia/Kolkata' });
   console.log('⏰ Weekly cron scheduled — Mondays 6:00 AM IST');
+
+  // Keep-alive every 10 minutes
+  cron.schedule('*/10 * * * *', keepAlive);
 }
 
 module.exports = { startCron, runWeeklyJob };

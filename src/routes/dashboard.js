@@ -111,6 +111,8 @@ router.get('/plan', requirePremium, async (req, res) => {
     const forceRefresh = req.query.refresh === 'true';
 
     if (planSnap.exists && !forceRefresh) {
+      // Set cache headers for fast repeat loads
+      res.set('Cache-Control', 'private, max-age=3600');
       return res.json(planSnap.data());
     }
 
