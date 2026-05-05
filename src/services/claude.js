@@ -1,632 +1,333 @@
-// src/routes/dashboard.js
-// All protected dashboard endpoints
+// src/services/claude.js
+// All AI calls — now using Google Gemini (free tier)
 
-const express = require('express');
-const { requireAuth, requirePremium } = require('../middleware/auth');
-const { getChannelStats, getRecentVideos, saveWeeklySnapshot, getSnapshots } = require('../services/youtube');
-const { generateWeeklyPlan, generateAnalysis, analyzeChannel, chatWithCoach, estimateGoalTimeline } = require('../services/claude');
-const { getDb } = require('../config/firebase');
+const axios = require('axios');
 
-const router = express.Router();
-
-// All dashboard routes require login
-router.use(requireAuth);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Safe JSON parser — handles Claude responses with special chars in strings
-// ─────────────────────────────────────────────────────────────────────────────
-function safeParseJSON(text) {
-  if (!text) return null;
-
-  // Remove markdown code fences if present
-  let clean = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
-
-  // Extract the outermost JSON object
-  const start = clean.indexOf('{');
-  const end   = clean.lastIndexOf('}');
-  if (start === -1 || end === -1) return null;
-  clean = clean.slice(start, end + 1);
-
-  // Try direct parse first
-  try { return JSON.parse(clean); } catch(e) {}
-
-  // If that fails, sanitize string values that may contain unescaped quotes/newlines
-  try {
-    // Replace literal newlines inside JSON string values with \n
-    let sanitized = clean
-      .replace(/\r\n/g, '\\n')
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\r')
-      .replace(/\t/g, '\\t');
-
-    return JSON.parse(sanitized);
-  } catch(e) {}
-
-  // Last resort: use a more aggressive clean
-  try {
-    // Remove all control characters
-    let aggressive = clean.replace(/[\x00-\x1F\x7F]/g, ' ');
-    return JSON.parse(aggressive);
-  } catch(e) {
-    console.error('[safeParseJSON] All parse attempts failed. Error:', e.message);
-    console.error('[safeParseJSON] Text snippet:', text.substring(0, 200));
-    return null;
+async function geminiRequest(prompt, maxTokens = 2000, retries = 3) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 },
+        },
+        { timeout: 60000 }
+      );
+      return res.data.candidates[0].content.parts[0].text.trim();
+    } catch (err) {
+      const status = err.response?.status;
+      console.error(`[Gemini] Attempt ${i+1} failed: ${status} ${err.message}`);
+      if (status === 429 && i < retries - 1) {
+        const wait = (i + 1) * 10000; // wait 10s, 20s, 30s
+        console.log(`[Gemini] Rate limited, waiting ${wait/1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+      } else {
+        throw err;
+      }
+    }
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /dashboard/onboard
-// Save user's niche/goal/language preferences
+// Fetch real trending headlines from Google News RSS
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/onboard', async (req, res) => {
-  try {
-    const { niche, lang, goal, freq, goalNumber } = req.body;
-    const db = getDb();
+async function fetchRealTrends(niche, lang) {
+  const now   = new Date();
+  const year  = now.getFullYear();
+  const month = now.toLocaleString('en-IN', { month: 'long' });
 
-    await db.collection('users').doc(req.user.uid).update({
-      onboarded: true,
-      profile: { niche, lang, goal, freq, goalNumber: goalNumber || 10000 },
-      updatedAt: new Date().toISOString(),
+  const nicheTerms = {
+    'Gaming':       `gaming India ${month} ${year}`,
+    'Tech Reviews': `smartphone launch India ${month} ${year}`,
+    'Cooking':      `viral recipe India ${month} ${year}`,
+    'Finance':      `stock market India news ${month} ${year}`,
+    'Fitness':      `fitness trend India ${month} ${year}`,
+    'Education':    `education news India ${month} ${year}`,
+    'Comedy':       `viral comedy India ${month} ${year}`,
+    'Vlogs':        `travel vlog India trending ${month} ${year}`,
+    'Beauty':       `beauty skincare trend India ${month} ${year}`,
+  };
+
+  const searchTerm = nicheTerms[niche] || `${niche} trending India ${month} ${year}`;
+
+  try {
+    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(searchTerm)}&hl=en-IN&gl=IN&ceid=IN:en`;
+    const response = await axios.get(rssUrl, {
+      timeout: 8000,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
 
-    // If user has a channel, fetch and save first snapshot
-    if (req.user.hasChannel && req.user.accessToken) {
-      try {
-        const stats  = await getChannelStats(req.user.accessToken);
-        const videos = await getRecentVideos(req.user.accessToken, stats.id);
-        await saveWeeklySnapshot(req.user.uid, stats, videos);
+    const headlines = [];
+    const patterns = [
+      /<title><!\[CDATA\[(.*?)\]\]><\/title>/g,
+      /<title>(.*?)<\/title>/g,
+    ];
 
-        // Auto-analyze channel content
-        const analysis = await analyzeChannel({ channel: stats, videos });
-        await db.collection('users').doc(req.user.uid).update({
-          channelAnalysis: analysis,
-        });
-      } catch (e) {
-        console.error('Snapshot on onboard error:', e.message);
-      }
-    }
-
-    res.json({ success: true, message: 'Profile saved!' });
-  } catch (err) {
-    console.error('Onboard error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /dashboard/plan
-// Returns this week's action plan (cached in Firestore, regenerated Mondays)
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/plan', requirePremium, async (req, res) => {
-  try {
-    const db = getDb();
-    const uid = req.user.uid;
-
-    // Check if plan exists for this week
-    const weekKey = getWeekKey();
-    const planRef = db.collection('users').doc(uid).collection('plans').doc(weekKey);
-    const planSnap = await planRef.get();
-
-    // Allow force refresh with ?refresh=true
-    const forceRefresh = req.query.refresh === 'true';
-
-    if (planSnap.exists && !forceRefresh) {
-      // Set cache headers for fast repeat loads
-      res.set('Cache-Control', 'private, max-age=3600');
-      return res.json(planSnap.data());
-    }
-
-    // No plan yet — generate one
-    const userSnap = await db.collection('users').doc(uid).get();
-    const userData = userSnap.data();
-
-    if (!userData.profile) {
-      return res.status(400).json({ error: 'Please complete onboarding first' });
-    }
-
-    // Fetch fresh channel data
-    let channel = userData.channel;
-    let snapshots = await getSnapshots(uid, 2);
-
-    if (req.user.accessToken) {
-      try {
-        channel = await getChannelStats(req.user.accessToken);
-        const videos = await getRecentVideos(req.user.accessToken, channel.id);
-        await saveWeeklySnapshot(uid, channel, videos);
-        snapshots = await getSnapshots(uid, 2);
-      } catch (e) {
-        console.error('YouTube fetch error:', e.message);
-      }
-    }
-
-    // Generate plan with Claude
-    const plan = await generateWeeklyPlan({
-      channel:   channel || { title: 'Your Channel', subscribers: 0, totalViews: 0 },
-      profile:   userData.profile,
-      snapshots,
-    });
-
-    // Save plan
-    const planData = {
-      ...plan,
-      weekKey,
-      generatedAt: new Date().toISOString(),
-      taskStates:  {}, // track which tasks user has checked off
-    };
-    await planRef.set(planData);
-
-    res.json(planData);
-  } catch (err) {
-    console.error('Plan error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PATCH /dashboard/plan/task
-// Update task completion state
-// ─────────────────────────────────────────────────────────────────────────────
-router.patch('/plan/task', requirePremium, async (req, res) => {
-  try {
-    const { taskId, done } = req.body;
-    const weekKey = getWeekKey();
-    const db = getDb();
-    await db
-      .collection('users').doc(req.user.uid)
-      .collection('plans').doc(weekKey)
-      .update({ [`taskStates.${taskId}`]: done });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /dashboard/analysis
-// Weekly performance analysis with AI insights
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/analysis', requirePremium, async (req, res) => {
-  try {
-    const db      = getDb();
-    const uid     = req.user.uid;
-    const userSnap = await db.collection('users').doc(uid).get();
-    const userData = userSnap.data();
-
-    let channel   = userData.channel;
-    let snapshots = await getSnapshots(uid, 2);
-
-    // Fetch fresh data if token available
-    if (req.user.accessToken) {
-      try {
-        channel = await getChannelStats(req.user.accessToken);
-        const videos = await getRecentVideos(req.user.accessToken, channel.id);
-        await saveWeeklySnapshot(uid, channel, videos);
-        snapshots = await getSnapshots(uid, 2);
-      } catch (e) {
-        console.error('YouTube fetch error:', e.message);
-      }
-    }
-
-    const thisWeek = snapshots[0] || { stats: channel, videos: [] };
-    const lastWeek = snapshots[1] || { stats: {} };
-
-    // Build stat deltas
-    const stats = {
-      subscribers:  { current: thisWeek.stats.subscribers || 0, delta: (thisWeek.stats.subscribers || 0) - (lastWeek.stats.subscribers || 0) },
-      totalViews:   { current: thisWeek.stats.totalViews || 0,  delta: (thisWeek.stats.totalViews || 0)  - (lastWeek.stats.totalViews || 0) },
-      videoCount:   { current: thisWeek.stats.videoCount || 0,  delta: (thisWeek.stats.videoCount || 0)  - (lastWeek.stats.videoCount || 0) },
-    };
-
-    // AI insights
-    const aiAnalysis = await generateAnalysis({
-      channel:  channel || userData.channel,
-      profile:  userData.profile || {},
-      snapshots,
-    });
-
-    // Recent videos
-    const videos = thisWeek.videos?.slice(0, 7).map(v => ({
-      title:       v.title,
-      views:       v.views,
-      likes:       v.likes,
-      publishedAt: v.publishedAt,
-    })) || [];
-
-    res.json({ stats, aiAnalysis, videos, weekKey: getWeekKey() });
-  } catch (err) {
-    console.error('Analysis error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /dashboard/chat
-// AI Coach chat — sends message history, returns Claude reply
-// ─────────────────────────────────────────────────────────────────────────────
-router.post('/chat', requirePremium, async (req, res) => {
-  try {
-    const { messages, taskContext, niche, lang } = req.body;
-    if (!messages?.length) return res.status(400).json({ error: 'No messages' });
-
-    const db      = getDb();
-    const userSnap = await db.collection('users').doc(req.user.uid).get();
-    const userData = userSnap.data();
-
-    // Check points
-    const weekKey = getWeekKey();
-    const lastReset = userData.pointsWeekKey || '';
-    let points = (lastReset !== weekKey) ? 50 : (userData.chatPoints ?? 50);
-    if (points < 5) return res.status(403).json({ error: 'Not enough points. Please recharge.' });
-
-    // Deduct points
-    const newPoints = Math.max(0, points - 5);
-    await db.collection('users').doc(req.user.uid).update({
-      chatPoints: newPoints,
-      pointsWeekKey: weekKey,
-    });
-
-    const reply = await chatWithCoach({
-      messages,
-      user:        req.user,
-      channel:     userData.channel,
-      profile:     userData.profile,
-      taskContext, // restrict to task topic
-      niche:       niche || userData.profile?.niche,
-      lang:        lang || userData.profile?.lang,
-    });
-
-    res.json({ reply, pointsLeft: newPoints });
-  } catch (err) {
-    console.error('Chat error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /dashboard/goal
-// Goal tracker data with AI-generated roadmap
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/goal', requirePremium, async (req, res) => {
-  try {
-    const db       = getDb();
-    const uid      = req.user.uid;
-    const userSnap = await db.collection('users').doc(uid).get();
-    const userData = userSnap.data();
-
-    let channel     = userData.channel;
-    const weekKey   = getWeekKey();
-    const goalNum   = userData.profile?.goalNumber || 10000;
-
-    // Fetch fresh subscriber count if possible
-    if (req.user.accessToken) {
-      try { channel = await getChannelStats(req.user.accessToken); } catch (e) {}
-    }
-
-    const currentSubs = channel?.subscribers || 0;
-
-    // Check Firestore cache — roadmap is cached per week per goal
-    // Add ?refresh=true to force regeneration
-    const forceRefresh = req.query.refresh === 'true';
-    const cacheKey  = `goal_${weekKey}_${goalNum}`;
-    const cacheRef  = db.collection('users').doc(uid).collection('goalCache').doc(cacheKey);
-    const cacheSnap = await cacheRef.get();
-
-    let timeline;
-    if (cacheSnap.exists && !forceRefresh) {
-      // Return cached roadmap instantly
-      timeline = cacheSnap.data();
-      console.log(`[Goal] Returning cached roadmap for week ${weekKey}`);
-    } else {
-      // Generate new roadmap with Claude
-      console.log(`[Goal] Generating new roadmap for week ${weekKey}`);
-      const snapshots = await getSnapshots(uid, 4);
-      timeline = await estimateGoalTimeline({
-        channel:  channel || { subscribers: 0 },
-        profile:  userData.profile || {},
-        snapshots,
-      });
-      // Save to cache
-      try {
-        await cacheRef.set({ ...timeline, cachedAt: new Date().toISOString() });
-      } catch (e) {
-        console.error('[Goal] Cache save failed:', e.message);
-      }
-    }
-
-    // Auto-detect if goal has been reached
-    const goalReached = currentSubs >= goalNum;
-
-    // Suggest next goal if current reached
-    function suggestNextGoal(current) {
-      const milestones = [100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000];
-      for (const m of milestones) {
-        if (m > current) return m;
-      }
-      return current * 2;
-    }
-
-    res.json({
-      current:      currentSubs,
-      goal:         goalNum,
-      goalReached,
-      suggestedNextGoal: goalReached ? suggestNextGoal(currentSubs) : null,
-      profile:      userData.profile,
-      achievements: userData.achievements || [],
-      goalJustSet:  userData.profile?.goalJustSet || false,
-      ...timeline,
-    });
-  } catch (err) {
-    console.error('Goal error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /dashboard/me — current user profile
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/me', async (req, res) => {
-  try {
-    const db      = getDb();
-    const userSnap = await db.collection('users').doc(req.user.uid).get();
-    const userData = userSnap.data();
-    const { accessToken, refreshToken, ...safe } = userData;
-    res.json(safe);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPER
-// ─────────────────────────────────────────────────────────────────────────────
-function getWeekKey() {
-  const d = new Date();
-  const jan1 = new Date(d.getFullYear(), 0, 1);
-  const week = Math.ceil(((d - jan1) / 86400000 + jan1.getDay() + 1) / 7);
-  return `${d.getFullYear()}-W${String(week).padStart(2, '0')}`;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /dashboard/task-guide
-// Generates a detailed step-by-step guide for a specific task
-// ─────────────────────────────────────────────────────────────────────────────
-router.post('/task-guide', requirePremium, async (req, res) => {
-  try {
-    const { task } = req.body;
-    if (!task) return res.status(400).json({ error: 'No task provided' });
-
-    const db  = getDb();
-    const uid = req.user.uid;
-
-    // Check Firestore cache first — return immediately if already generated
-    const cacheKey  = `task_${task.id}_${getWeekKey()}`;
-    const cacheRef  = db.collection('users').doc(uid).collection('taskGuides').doc(cacheKey);
-    const cacheSnap = await cacheRef.get();
-    if (cacheSnap.exists) {
-      console.log(`[TaskGuide] Returning cached guide for task ${task.id}`);
-      return res.json(cacheSnap.data());
-    }
-
-    const userSnap = await db.collection('users').doc(uid).get();
-    const userData = userSnap.data();
-    const profile  = userData.profile || {};
-    const niche    = profile.nicheDesc || profile.niche || 'content creation';
-    const lang     = profile.lang || 'Tamil';
-    const channel  = userData.channel || {};
-
-    const axios = require('axios');
-    const gemini = async (prompt, maxTokens=2500, retries=3) => {
-      for(let i=0;i<retries;i++){
-        try{
-          const r=await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
-            {contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:maxTokens,temperature:0.7}},
-            {timeout:60000}
-          );
-          return r.data.candidates[0].content.parts[0].text.trim();
-        }catch(err){
-          if(err.response?.status===429&&i<retries-1){await new Promise(r=>setTimeout(r,(i+1)*10000));}
-          else throw err;
+    for (const regex of patterns) {
+      let match;
+      while ((match = regex.exec(response.data)) !== null && headlines.length < 10) {
+        const t = match[1].replace(/<[^>]+>/g, '').trim();
+        if (t.length > 15 && !t.toLowerCase().includes('google news') && !headlines.includes(t)) {
+          headlines.push(t);
         }
       }
-    };
+      if (headlines.length > 0) break;
+    }
 
-    const isVideo  = task.type === 'video' || task.type === 'short';
-    const isEngage = task.type === 'engage';
-    const isSeo    = task.type === 'seo';
-    const now      = new Date();
-    const year     = now.getFullYear();
+    console.log(`[Trends] Fetched ${headlines.length} headlines for "${searchTerm}"`);
+    return { headlines: headlines.slice(0, 8), searchTerm, month, year };
+  } catch (err) {
+    console.error('[Trends] Fetch failed:', err.message);
+    return { headlines: [], searchTerm, month, year };
+  }
+}
 
-    // Step guide prompt
-    const guidePrompt = `You are TubeCoach. A YouTube creator makes ${niche} content in ${lang}. Channel: "${channel.title || 'New Channel'}".
+// ─────────────────────────────────────────────────────────────────────────────
+// Generate weekly action plan
+// ─────────────────────────────────────────────────────────────────────────────
+async function generateWeeklyPlan({ channel, profile, snapshots }) {
+  const thisWeek     = snapshots[0]?.stats || {};
+  const lastWeek     = snapshots[1]?.stats || {};
+  const recentVideos = snapshots[0]?.videos || [];
+  const subDelta     = (thisWeek.subscribers || 0) - (lastWeek.subscribers || 0);
 
-TASK: ${task.title}
-TASK TYPE: ${task.type}
-${task.detail ? 'CONTEXT: ' + task.detail : ''}
-${task.trendReason ? 'TREND: ' + task.trendReason : ''}
+  const niche   = profile.niche || 'Tech Reviews';
+  const lang    = profile.lang  || 'Tamil';
+  const now     = new Date();
+  const dateStr = now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const year    = now.getFullYear();
+  const month   = now.toLocaleString('en-IN', { month: 'long' });
 
-Create a detailed step-by-step guide to complete this task.
-${isVideo ? `
-For this VIDEO task include:
-- Complete script with EXACT words to say on camera in ${lang}
-- What to show on screen at each moment
-- Timestamps for each section (0:00-0:30 etc.)
-- Thumbnail concept description` : ''}
-${isSeo ? 'Include specific keywords, tags, and exact text to copy-paste.' : ''}
-${isEngage ? 'Include exactly what to comment or post, word for word.' : ''}
+  const trendData = await fetchRealTrends(niche, lang);
 
-CRITICAL JSON RULES:
-- Respond with valid JSON only — no markdown, no code fences, no backticks
-- Never use double quotes inside string values — use single quotes instead
-- Never use actual newlines inside string values — write everything on one line per field
-- Keep script and onScreen as single sentences, not multi-line paragraphs
-- If a field does not apply, use the string "null" not the value null
-- All URLs must be real, working websites — only use well-known platforms
+  const headlinesBlock = trendData.headlines.length > 0
+    ? `REAL GOOGLE NEWS HEADLINES (fetched right now — ${dateStr}):\n${trendData.headlines.map((h, i) => `${i + 1}. ${h}`).join('\n')}\n\nUse these headlines to identify what is ACTUALLY trending this week.`
+    : `No headlines fetched. Use your best knowledge of what is happening in ${niche} in India in ${month} ${year}.`;
 
+  const prompt = `You are TubeCoach, an expert YouTube growth strategist for Indian creators.
+
+TODAY: ${dateStr}
+YEAR: ${year} — NEVER mention or reference 2024.
+
+${headlinesBlock}
+
+CREATOR:
+- Channel: "${channel.title || 'New Channel'}"
+- Niche: ${niche}
+- Language: ${lang}
+- Subscribers: ${(channel.subscribers || 0).toLocaleString()}
+- Goal: ${profile.goal || '10,000 subscribers'}
+- Posts per week: ${profile.freq || '2 videos/week'}
+- Subscriber growth last week: ${subDelta >= 0 ? '+' : ''}${subDelta}
+
+RECENT VIDEOS:
+${recentVideos.slice(0, 4).map(v => `- "${v.title}" — ${(v.views || 0).toLocaleString()} views`).join('\n') || '- New channel, no videos yet'}
+
+TASK: Create a weekly action plan using the REAL headlines above.
+
+Respond ONLY with this JSON (no markdown, no extra text, no code blocks):
 {
-  "totalTime": "3-4 hours",
-  "steps": [
+  "weekSummary": "What is actually happening this week in their niche based on real news",
+  "tasks": [
     {
-      "stepNum": 1,
-      "title": "Step title here",
-      "timestamp": "0:00 - 0:30",
-      "duration": "20 min",
-      "what": "Exactly what to do in this step in one clear sentence",
-      "script": "What to say on camera in one paragraph in ${lang}",
-      "onScreen": "What to show on screen in one sentence",
-      "tip": "One pro tip in one sentence"
+      "id": 1,
+      "type": "video",
+      "priority": "high",
+      "title": "Post: \\"[specific video title in ${lang} based on real current trend]\\"",
+      "detail": "Why this is relevant this week",
+      "trendReason": "Specific real event from ${month} ${year} driving this",
+      "isIdea": true
     }
-  ]
+  ],
+  "trends": [
+    { "name": "Real trending topic from news", "score": 94 },
+    { "name": "Real trending topic from news", "score": 87 },
+    { "name": "Real trending topic from news", "score": 79 },
+    { "name": "Real trending topic from news", "score": 72 },
+    { "name": "Real trending topic from news", "score": 65 }
+  ],
+  "weeklyInsight": "One insight based on real events happening this week"
 }
 
-Include 5-7 steps. For video: Pre-production, Hook/Intro, Main Content, Outro, Thumbnail, Upload.`;
+RULES:
+- 6-8 tasks total. Types: video, short, engage, seo, community
+- 2-3 tasks with isIdea: true (video ideas from real trends)
+- Year must be ${year} everywhere
+- trends must come from the real headlines`;
 
-    const guideText = await gemini(guidePrompt, 2500);
-    const guide = safeParseJSON(guideText);
-    if (!guide) throw new Error('Could not parse guide — Claude returned invalid JSON');
+  const text = await geminiRequest(prompt, 2000);
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('Could not parse plan from Gemini');
+  return JSON.parse(jsonMatch[0]);
+}
 
-    // For video/short tasks: also generate full SEO content
-    let seoContent = null;
-    if (isVideo) {
-      const videoTitle = task.title.replace(/^Post:\s*/i, '').replace(/^Create:\s*/i, '');
-      const seoPrompt = `You are a YouTube SEO expert for Indian ${lang} creators making ${niche} content.
+// ─────────────────────────────────────────────────────────────────────────────
+// Generate channel analysis
+// ─────────────────────────────────────────────────────────────────────────────
+async function generateAnalysis({ channel, profile, snapshots }) {
+  const thisWeek = snapshots[0]?.stats || channel;
+  const lastWeek = snapshots[1]?.stats || {};
+  const videos   = snapshots[0]?.videos || [];
 
-VIDEO TITLE: "${videoTitle}"
-CHANNEL: "${channel.title || 'New Channel'}"
-LANGUAGE: ${lang}
-YEAR: ${year}
+  const prompt = `You are TubeCoach. Analyze this Indian YouTube creator's weekly performance.
 
-Generate a YouTube SEO package. IMPORTANT: Respond in valid JSON only. Do not use double quotes inside string values — use single quotes instead. No newlines inside string values.
+CHANNEL: "${channel.title}" | Niche: ${profile.niche} | Language: ${profile.lang}
+THIS WEEK: ${(thisWeek.subscribers || 0).toLocaleString()} subs, ${(thisWeek.totalViews || 0).toLocaleString()} views
+LAST WEEK: ${(lastWeek.subscribers || 0).toLocaleString()} subs
+TOP VIDEOS: ${videos.slice(0, 3).map(v => `"${v.title}" (${(v.views || 0).toLocaleString()} views)`).join(', ') || 'No videos yet'}
 
+Give 3 actionable insights. JSON only:
 {
-  "title": {
-    "option1": "catchy SEO title under 70 chars",
-    "option2": "alternative angle title under 70 chars",
-    "option3": "short punchy title under 50 chars"
-  },
-  "description": "500 word description with timestamps, keywords, call to action. No line breaks.",
-  "tags": ["tag1", "tag2", "tag3"],
-  "thumbnailConcept": "thumbnail design description",
-  "firstComment": "pinned comment to post after upload"
+  "insights": [
+    { "emoji": "📈", "text": "what worked this week" },
+    { "emoji": "⚠️", "text": "what to improve" },
+    { "emoji": "🚀", "text": "specific action for next week" }
+  ],
+  "bestDay": "Thursday",
+  "bestDayReason": "why this day works for their audience",
+  "topPerformer": "best video title this week"
+}`;
+
+  const text = await geminiRequest(prompt, 600);
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  return JSON.parse(jsonMatch ? jsonMatch[0] : text);
 }
 
-Rules: 15-20 tags mixing ${lang} and English, include year ${year}, no 2024 references.`;
+// ─────────────────────────────────────────────────────────────────────────────
+// Onboarding — analyze existing channel
+// ─────────────────────────────────────────────────────────────────────────────
+async function analyzeChannel({ channel, videos }) {
+  const prompt = `Analyze this YouTube channel.
 
-      const seoText = await gemini(seoPrompt, 1500);
-      seoContent = safeParseJSON(seoText);
+CHANNEL: "${channel.title}"
+DESCRIPTION: "${channel.description}"
+SUBSCRIBERS: ${channel.subscribers}
+RECENT VIDEOS:
+${videos.slice(0, 8).map(v => `- "${v.title}"`).join('\n')}
+
+JSON only:
+{
+  "detectedNiche": "Tech Reviews",
+  "detectedLang": "Tamil",
+  "contentSummary": "One sentence about this channel",
+  "strengths": ["strength 1", "strength 2"],
+  "suggestions": ["suggestion 1", "suggestion 2"]
+}`;
+
+  const text = await geminiRequest(prompt, 400);
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  return JSON.parse(jsonMatch ? jsonMatch[0] : text);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI Coach Chat
+// ─────────────────────────────────────────────────────────────────────────────
+async function chatWithCoach({ messages, user, channel, profile, taskContext, niche, lang }) {
+  const now = new Date();
+
+  const taskSection = taskContext
+    ? `CURRENT TASK: "${taskContext.title}" (${taskContext.type})
+Details: ${taskContext.detail || 'No additional details'}
+STRICT RULE: Only answer questions related to this specific task. If user asks something unrelated, redirect them back to the task.`
+    : `Help with anything related to their YouTube growth.`;
+
+  const systemPrompt = `You are AITube Coach, an expert YouTube growth assistant for Indian creators.
+Today is ${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}.
+
+CREATOR:
+- Name: ${user.name}
+- Channel: "${channel?.title || 'their channel'}"
+- Niche: ${profile?.nicheDesc || niche || profile?.niche || 'Content creation'}
+- Language: ${lang || profile?.lang || 'Tamil'}
+- Subscribers: ${(channel?.subscribers || 0).toLocaleString()}
+- Goal: ${profile?.goal || '10,000 subscribers'}
+
+${taskSection}
+
+Be practical, specific, encouraging. Mention Indian context, prices in rupees.
+Keep responses to 3-5 sentences unless writing a full script or list.`;
+
+  const conversationText = messages.map(m =>
+    `${m.role === 'ai' ? 'AITube Coach' : user.name}: ${m.text}`
+  ).join('\n');
+
+  const fullPrompt = `${systemPrompt}\n\nCONVERSATION:\n${conversationText}\n\nAITube Coach:`;
+
+  return await geminiRequest(fullPrompt, 1000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Goal estimation
+// ─────────────────────────────────────────────────────────────────────────────
+async function estimateGoalTimeline({ channel, profile, snapshots }) {
+  const current  = channel.subscribers || 0;
+  const goalNum  = profile.goalNumber  || 10000;
+  const niche    = profile.niche       || 'Content creation';
+  const freq     = profile.freq        || '2 videos/week';
+  const remaining = Math.max(0, goalNum - current);
+
+  const recent = snapshots.slice(0, 4);
+  let avgWeeklyGrowth = 50;
+  if (recent.length > 1) {
+    const deltas = recent.slice(0, -1).map((s, i) =>
+      Math.max(0, (s.stats?.subscribers || 0) - (recent[i + 1]?.stats?.subscribers || 0))
+    );
+    const sum = deltas.reduce((a, b) => a + b, 0);
+    avgWeeklyGrowth = Math.max(10, Math.round(sum / deltas.length));
+  }
+
+  const estimatedWeeks = avgWeeklyGrowth > 0 ? Math.ceil(remaining / avgWeeklyGrowth) : 999;
+  const weeklyGrowthNeeded = estimatedWeeks > 0 ? Math.ceil(remaining / Math.min(estimatedWeeks, 52)) : remaining;
+
+  const allMilestones = [100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000];
+  const milestones = allMilestones.filter(m => m <= goalNum * 2).slice(0, 5).map(m => ({
+    label: m >= 100000 ? (m / 100000) + ' Lakh subs' : m >= 1000 ? (m / 1000) + 'K subs' : m + ' subs',
+    done: current >= m,
+    pct: Math.min(100, Math.round((current / m) * 100)),
+  }));
+
+  const prompt = `You are TubeCoach. Indian YouTube creator:
+- Niche: ${niche}, Posts: ${freq}
+- Current: ${current} subs, Goal: ${goalNum} subs
+- Weekly growth needed: ${weeklyGrowthNeeded} subs/week
+
+Write a realistic 4-week action roadmap. JSON only:
+{
+  "roadmap": [
+    { "week": "Week 1", "focus": "specific action", "impact": "+${Math.round(weeklyGrowthNeeded * 0.8)} subs est." },
+    { "week": "Week 2", "focus": "specific action", "impact": "+${Math.round(weeklyGrowthNeeded)} subs est." },
+    { "week": "Week 3", "focus": "specific action", "impact": "+${Math.round(weeklyGrowthNeeded * 1.2)} subs est." },
+    { "week": "Week 4", "focus": "specific action", "impact": "+${Math.round(weeklyGrowthNeeded * 1.5)} subs est." }
+  ]
+}`;
+
+  let roadmap = [
+    { week: 'Week 1', focus: 'Post 2 videos on trending topics in your niche', impact: `+${Math.round(weeklyGrowthNeeded * 0.8)} subs est.` },
+    { week: 'Week 2', focus: 'Engage daily in comments, collaborate with similar creators', impact: `+${Math.round(weeklyGrowthNeeded)} subs est.` },
+    { week: 'Week 3', focus: 'Post 1 YouTube Short every day to boost reach', impact: `+${Math.round(weeklyGrowthNeeded * 1.2)} subs est.` },
+    { week: 'Week 4', focus: 'Optimize all video titles and thumbnails for better CTR', impact: `+${Math.round(weeklyGrowthNeeded * 1.5)} subs est.` },
+  ];
+
+  try {
+    const text = await geminiRequest(prompt, 400);
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed.roadmap && Array.isArray(parsed.roadmap)) roadmap = parsed.roadmap;
     }
-
-    const result = { ...guide, seoContent };
-
-    // Save to Firestore cache — repeat clicks load instantly
-    try {
-      await cacheRef.set({ ...result, cachedAt: new Date().toISOString() });
-    } catch(e) { console.error('[TaskGuide] Cache save failed:', e.message); }
-
-    res.json(result);
-
-  } catch (err) {
-    console.error('Task guide error:', err.message);
-    res.status(500).json({ error: err.message });
+  } catch(e) {
+    console.error('[Goal] Roadmap parse failed, using fallback:', e.message);
   }
-});
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /dashboard/update-goal
-// Called when user reaches goal and sets a new one
-// ─────────────────────────────────────────────────────────────────────────────
-router.post('/update-goal', requireAuth, async (req, res) => {
-  try {
-    const { goalNumber, goal } = req.body;
-    const db = getDb();
-    const uid = req.user.uid;
+  return { estimatedWeeks, weeklyGrowthNeeded, avgWeeklyGrowth, roadmap, milestones };
+}
 
-    // Save old goal as achievement
-    const userSnap = await db.collection('users').doc(uid).get();
-    const userData = userSnap.data();
-    const oldGoal  = userData.profile?.goalNumber || 10000;
-    const now      = new Date();
-
-    const achievementIcons = {
-      1000: '🎯', 10000: '🏆', 100000: '🥈', 1000000: '🥇', 10000000: '💎'
-    };
-
-    const newAchievement = {
-      icon:  achievementIcons[oldGoal] || '🏆',
-      label: oldGoal.toLocaleString('en-IN') + ' subscribers',
-      date:  now.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }),
-      achievedAt: now.toISOString(),
-    };
-
-    const existing = userData.achievements || [];
-
-    // Update profile with new goal + save achievement
-    await db.collection('users').doc(uid).update({
-      'profile.goalNumber': goalNumber,
-      'profile.goal':       goal,
-      'profile.goalJustSet': true,
-      achievements: [...existing, newAchievement],
-      updatedAt: now.toISOString(),
-    });
-
-    // Delete cached plan + goal roadmap so they regenerate with new goal
-    const weekKey   = getWeekKey();
-    const planRef   = db.collection('users').doc(uid).collection('plans').doc(weekKey);
-    const planSnap  = await planRef.get();
-    if (planSnap.exists) await planRef.delete();
-
-    // Clear all goal caches so roadmap regenerates for new goal
-    const goalCaches = await db.collection('users').doc(uid).collection('goalCache').get();
-    for (const doc of goalCaches.docs) { await doc.ref.delete(); }
-
-    res.json({ success: true, achievement: newAchievement });
-  } catch (err) {
-    console.error('Update goal error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /dashboard/chat-points — get user's current points
-// POST /dashboard/chat-points — update points after message
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/chat-points', requireAuth, async (req, res) => {
-  try {
-    const db = getDb();
-    const uid = req.user.uid;
-    const userSnap = await db.collection('users').doc(uid).get();
-    const userData = userSnap.data();
-
-    const WEEKLY_POINTS = 50;
-    const weekKey = getWeekKey();
-    const lastReset = userData.pointsWeekKey || '';
-    let points = userData.chatPoints;
-
-    // Reset points every week
-    if (lastReset !== weekKey || points === undefined || points === null) {
-      points = WEEKLY_POINTS;
-      await db.collection('users').doc(uid).update({
-        chatPoints: WEEKLY_POINTS,
-        pointsWeekKey: weekKey,
-      });
-    }
-
-    res.json({ points, weekKey });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post('/chat-points', requireAuth, async (req, res) => {
-  try {
-    const db = getDb();
-    const uid = req.user.uid;
-    const { points } = req.body;
-    await db.collection('users').doc(uid).update({ chatPoints: points });
-    res.json({ points });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-module.exports = router;
+module.exports = {
+  generateWeeklyPlan,
+  generateAnalysis,
+  analyzeChannel,
+  chatWithCoach,
+  estimateGoalTimeline,
+};
