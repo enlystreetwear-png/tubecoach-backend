@@ -415,11 +415,21 @@ router.post('/task-guide', requirePremium, async (req, res) => {
     const channel  = userData.channel || {};
 
     const axios = require('axios');
-    const gemini = (prompt, maxTokens=2500) => axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      { contents:[{parts:[{text:prompt}]}], generationConfig:{maxOutputTokens:maxTokens,temperature:0.7} },
-      { timeout:30000 }
-    ).then(r=>r.data.candidates[0].content.parts[0].text.trim());
+    const gemini = async (prompt, maxTokens=2500, retries=3) => {
+      for(let i=0;i<retries;i++){
+        try{
+          const r=await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
+            {contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:maxTokens,temperature:0.7}},
+            {timeout:60000}
+          );
+          return r.data.candidates[0].content.parts[0].text.trim();
+        }catch(err){
+          if(err.response?.status===429&&i<retries-1){await new Promise(r=>setTimeout(r,(i+1)*10000));}
+          else throw err;
+        }
+      }
+    };
 
     const isVideo  = task.type === 'video' || task.type === 'short';
     const isEngage = task.type === 'engage';

@@ -3,16 +3,31 @@
 
 const axios = require('axios');
 
-function geminiRequest(prompt, maxTokens = 2000) {
+async function geminiRequest(prompt, maxTokens = 2000, retries = 3) {
   const apiKey = process.env.GEMINI_API_KEY;
-  return axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-    {
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 },
-    },
-    { timeout: 30000 }
-  ).then(r => r.data.candidates[0].content.parts[0].text.trim());
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 },
+        },
+        { timeout: 60000 }
+      );
+      return res.data.candidates[0].content.parts[0].text.trim();
+    } catch (err) {
+      const status = err.response?.status;
+      console.error(`[Gemini] Attempt ${i+1} failed: ${status} ${err.message}`);
+      if (status === 429 && i < retries - 1) {
+        const wait = (i + 1) * 10000; // wait 10s, 20s, 30s
+        console.log(`[Gemini] Rate limited, waiting ${wait/1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+      } else {
+        throw err;
+      }
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
