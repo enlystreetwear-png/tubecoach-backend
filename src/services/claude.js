@@ -1,33 +1,30 @@
 // src/services/claude.js
-// All AI calls — now using Google Gemini (free tier)
+// All AI calls — using Groq (free, fast, llama-3.3-70b)
 
 const axios = require('axios');
 
-async function geminiRequest(prompt, maxTokens = 2000, retries = 3) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
-        {
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 },
-        },
-        { timeout: 60000 }
-      );
-      return res.data.candidates[0].content.parts[0].text.trim();
-    } catch (err) {
-      const status = err.response?.status;
-      console.error(`[Gemini] Attempt ${i+1} failed: ${status} ${err.message}`);
-      if (status === 429 && i < retries - 1) {
-        const wait = (i + 1) * 10000; // wait 10s, 20s, 30s
-        console.log(`[Gemini] Rate limited, waiting ${wait/1000}s...`);
-        await new Promise(r => setTimeout(r, wait));
-      } else {
-        throw err;
-      }
+async function groqRequest(systemPrompt, userPrompt, maxTokens = 2000) {
+  const apiKey = process.env.GROQ_API_KEY;
+  const res = await axios.post(
+    'https://api.groq.com/openai/v1/chat/completions',
+    {
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userPrompt   },
+      ],
+      max_tokens:  maxTokens,
+      temperature: 0.7,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 60000,
     }
-  }
+  );
+  return res.data.choices[0].message.content.trim();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,63 +100,47 @@ async function generateWeeklyPlan({ channel, profile, snapshots }) {
   const trendData = await fetchRealTrends(niche, lang);
 
   const headlinesBlock = trendData.headlines.length > 0
-    ? `REAL GOOGLE NEWS HEADLINES (fetched right now — ${dateStr}):\n${trendData.headlines.map((h, i) => `${i + 1}. ${h}`).join('\n')}\n\nUse these headlines to identify what is ACTUALLY trending this week.`
-    : `No headlines fetched. Use your best knowledge of what is happening in ${niche} in India in ${month} ${year}.`;
+    ? `REAL GOOGLE NEWS HEADLINES (fetched right now — ${dateStr}):\n${trendData.headlines.map((h, i) => `${i + 1}. ${h}`).join('\n')}`
+    : `No headlines fetched. Use your knowledge of ${niche} trends in India for ${month} ${year}.`;
 
-  const prompt = `You are TubeCoach, an expert YouTube growth strategist for Indian creators.
+  const system = `You are TubeCoach, an expert YouTube growth strategist for Indian creators. You always respond with valid JSON only — no markdown, no code blocks, no extra text.`;
 
-TODAY: ${dateStr}
-YEAR: ${year} — NEVER mention or reference 2024.
+  const user = `TODAY: ${dateStr}. YEAR: ${year}.
 
 ${headlinesBlock}
 
 CREATOR:
 - Channel: "${channel.title || 'New Channel'}"
-- Niche: ${niche}
-- Language: ${lang}
+- Niche: ${niche}, Language: ${lang}
 - Subscribers: ${(channel.subscribers || 0).toLocaleString()}
 - Goal: ${profile.goal || '10,000 subscribers'}
 - Posts per week: ${profile.freq || '2 videos/week'}
-- Subscriber growth last week: ${subDelta >= 0 ? '+' : ''}${subDelta}
+- Growth last week: ${subDelta >= 0 ? '+' : ''}${subDelta}
 
 RECENT VIDEOS:
-${recentVideos.slice(0, 4).map(v => `- "${v.title}" — ${(v.views || 0).toLocaleString()} views`).join('\n') || '- New channel, no videos yet'}
+${recentVideos.slice(0, 4).map(v => `- "${v.title}" — ${(v.views || 0).toLocaleString()} views`).join('\n') || '- New channel'}
 
-TASK: Create a weekly action plan using the REAL headlines above.
-
-Respond ONLY with this JSON (no markdown, no extra text, no code blocks):
+Create a weekly action plan. Respond ONLY with this JSON:
 {
-  "weekSummary": "What is actually happening this week in their niche based on real news",
+  "weekSummary": "what is trending this week in their niche",
   "tasks": [
-    {
-      "id": 1,
-      "type": "video",
-      "priority": "high",
-      "title": "Post: \\"[specific video title in ${lang} based on real current trend]\\"",
-      "detail": "Why this is relevant this week",
-      "trendReason": "Specific real event from ${month} ${year} driving this",
-      "isIdea": true
-    }
+    { "id": 1, "type": "video", "priority": "high", "title": "Post: \\"specific video title in ${lang}\\"", "detail": "why relevant", "trendReason": "real trend driving this", "isIdea": true }
   ],
   "trends": [
-    { "name": "Real trending topic from news", "score": 94 },
-    { "name": "Real trending topic from news", "score": 87 },
-    { "name": "Real trending topic from news", "score": 79 },
-    { "name": "Real trending topic from news", "score": 72 },
-    { "name": "Real trending topic from news", "score": 65 }
+    { "name": "trending topic", "score": 94 },
+    { "name": "trending topic", "score": 87 },
+    { "name": "trending topic", "score": 79 },
+    { "name": "trending topic", "score": 72 },
+    { "name": "trending topic", "score": 65 }
   ],
-  "weeklyInsight": "One insight based on real events happening this week"
+  "weeklyInsight": "one insight for this week"
 }
 
-RULES:
-- 6-8 tasks total. Types: video, short, engage, seo, community
-- 2-3 tasks with isIdea: true (video ideas from real trends)
-- Year must be ${year} everywhere
-- trends must come from the real headlines`;
+Rules: 6-8 tasks total, types: video/short/engage/seo/community, 2-3 with isIdea:true`;
 
-  const text = await geminiRequest(prompt, 2000);
+  const text = await groqRequest(system, user, 2000);
   const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Could not parse plan from Gemini');
+  if (!jsonMatch) throw new Error('Could not parse plan');
   return JSON.parse(jsonMatch[0]);
 }
 
@@ -171,12 +152,11 @@ async function generateAnalysis({ channel, profile, snapshots }) {
   const lastWeek = snapshots[1]?.stats || {};
   const videos   = snapshots[0]?.videos || [];
 
-  const prompt = `You are TubeCoach. Analyze this Indian YouTube creator's weekly performance.
-
-CHANNEL: "${channel.title}" | Niche: ${profile.niche} | Language: ${profile.lang}
-THIS WEEK: ${(thisWeek.subscribers || 0).toLocaleString()} subs, ${(thisWeek.totalViews || 0).toLocaleString()} views
-LAST WEEK: ${(lastWeek.subscribers || 0).toLocaleString()} subs
-TOP VIDEOS: ${videos.slice(0, 3).map(v => `"${v.title}" (${(v.views || 0).toLocaleString()} views)`).join(', ') || 'No videos yet'}
+  const system = `You are TubeCoach analyzing Indian YouTube channels. Respond with valid JSON only.`;
+  const user   = `Channel: "${channel.title}" | Niche: ${profile.niche} | Language: ${profile.lang}
+This week: ${(thisWeek.subscribers||0).toLocaleString()} subs, ${(thisWeek.totalViews||0).toLocaleString()} views
+Last week: ${(lastWeek.subscribers||0).toLocaleString()} subs
+Top videos: ${videos.slice(0,3).map(v=>`"${v.title}" (${(v.views||0).toLocaleString()} views)`).join(', ')||'No videos yet'}
 
 Give 3 actionable insights. JSON only:
 {
@@ -186,11 +166,11 @@ Give 3 actionable insights. JSON only:
     { "emoji": "🚀", "text": "specific action for next week" }
   ],
   "bestDay": "Thursday",
-  "bestDayReason": "why this day works for their audience",
-  "topPerformer": "best video title this week"
+  "bestDayReason": "why this day works",
+  "topPerformer": "best video title"
 }`;
 
-  const text = await geminiRequest(prompt, 600);
+  const text = await groqRequest(system, user, 600);
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   return JSON.parse(jsonMatch ? jsonMatch[0] : text);
 }
@@ -199,24 +179,22 @@ Give 3 actionable insights. JSON only:
 // Onboarding — analyze existing channel
 // ─────────────────────────────────────────────────────────────────────────────
 async function analyzeChannel({ channel, videos }) {
-  const prompt = `Analyze this YouTube channel.
-
-CHANNEL: "${channel.title}"
-DESCRIPTION: "${channel.description}"
-SUBSCRIBERS: ${channel.subscribers}
-RECENT VIDEOS:
-${videos.slice(0, 8).map(v => `- "${v.title}"`).join('\n')}
+  const system = `You are TubeCoach. Respond with valid JSON only.`;
+  const user   = `Analyze this YouTube channel.
+Channel: "${channel.title}", Subscribers: ${channel.subscribers}
+Description: "${channel.description}"
+Recent videos: ${videos.slice(0,8).map(v=>`"${v.title}"`).join(', ')}
 
 JSON only:
 {
   "detectedNiche": "Tech Reviews",
   "detectedLang": "Tamil",
-  "contentSummary": "One sentence about this channel",
+  "contentSummary": "one sentence about this channel",
   "strengths": ["strength 1", "strength 2"],
   "suggestions": ["suggestion 1", "suggestion 2"]
 }`;
 
-  const text = await geminiRequest(prompt, 400);
+  const text = await groqRequest(system, user, 400);
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   return JSON.parse(jsonMatch ? jsonMatch[0] : text);
 }
@@ -228,34 +206,21 @@ async function chatWithCoach({ messages, user, channel, profile, taskContext, ni
   const now = new Date();
 
   const taskSection = taskContext
-    ? `CURRENT TASK: "${taskContext.title}" (${taskContext.type})
-Details: ${taskContext.detail || 'No additional details'}
-STRICT RULE: Only answer questions related to this specific task. If user asks something unrelated, redirect them back to the task.`
+    ? `CURRENT TASK: "${taskContext.title}" (${taskContext.type})\nOnly answer questions about this task. Redirect off-topic questions back to the task.`
     : `Help with anything related to their YouTube growth.`;
 
-  const systemPrompt = `You are AITube Coach, an expert YouTube growth assistant for Indian creators.
-Today is ${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}.
-
-CREATOR:
-- Name: ${user.name}
-- Channel: "${channel?.title || 'their channel'}"
-- Niche: ${profile?.nicheDesc || niche || profile?.niche || 'Content creation'}
-- Language: ${lang || profile?.lang || 'Tamil'}
-- Subscribers: ${(channel?.subscribers || 0).toLocaleString()}
-- Goal: ${profile?.goal || '10,000 subscribers'}
-
+  const system = `You are AITube Coach, an expert YouTube growth assistant for Indian creators.
+Today: ${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}.
+Creator: ${user.name}, Channel: "${channel?.title||'their channel'}", Niche: ${niche||profile?.niche}, Language: ${lang||profile?.lang}, Subscribers: ${(channel?.subscribers||0).toLocaleString()}, Goal: ${profile?.goal||'10,000 subscribers'}.
 ${taskSection}
-
-Be practical, specific, encouraging. Mention Indian context, prices in rupees.
-Keep responses to 3-5 sentences unless writing a full script or list.`;
+Be practical, specific, encouraging. Use Indian context, prices in rupees. Keep responses to 3-5 sentences unless writing a script.`;
 
   const conversationText = messages.map(m =>
     `${m.role === 'ai' ? 'AITube Coach' : user.name}: ${m.text}`
   ).join('\n');
 
-  const fullPrompt = `${systemPrompt}\n\nCONVERSATION:\n${conversationText}\n\nAITube Coach:`;
-
-  return await geminiRequest(fullPrompt, 1000);
+  const text = await groqRequest(system, conversationText, 800);
+  return text;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -283,43 +248,17 @@ async function estimateGoalTimeline({ channel, profile, snapshots }) {
 
   const allMilestones = [100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000];
   const milestones = allMilestones.filter(m => m <= goalNum * 2).slice(0, 5).map(m => ({
-    label: m >= 100000 ? (m / 100000) + ' Lakh subs' : m >= 1000 ? (m / 1000) + 'K subs' : m + ' subs',
+    label: m >= 100000 ? (m/100000)+' Lakh subs' : m >= 1000 ? (m/1000)+'K subs' : m+' subs',
     done: current >= m,
-    pct: Math.min(100, Math.round((current / m) * 100)),
+    pct:  Math.min(100, Math.round((current / m) * 100)),
   }));
 
-  const prompt = `You are TubeCoach. Indian YouTube creator:
-- Niche: ${niche}, Posts: ${freq}
-- Current: ${current} subs, Goal: ${goalNum} subs
-- Weekly growth needed: ${weeklyGrowthNeeded} subs/week
-
-Write a realistic 4-week action roadmap. JSON only:
-{
-  "roadmap": [
-    { "week": "Week 1", "focus": "specific action", "impact": "+${Math.round(weeklyGrowthNeeded * 0.8)} subs est." },
-    { "week": "Week 2", "focus": "specific action", "impact": "+${Math.round(weeklyGrowthNeeded)} subs est." },
-    { "week": "Week 3", "focus": "specific action", "impact": "+${Math.round(weeklyGrowthNeeded * 1.2)} subs est." },
-    { "week": "Week 4", "focus": "specific action", "impact": "+${Math.round(weeklyGrowthNeeded * 1.5)} subs est." }
-  ]
-}`;
-
-  let roadmap = [
-    { week: 'Week 1', focus: 'Post 2 videos on trending topics in your niche', impact: `+${Math.round(weeklyGrowthNeeded * 0.8)} subs est.` },
-    { week: 'Week 2', focus: 'Engage daily in comments, collaborate with similar creators', impact: `+${Math.round(weeklyGrowthNeeded)} subs est.` },
-    { week: 'Week 3', focus: 'Post 1 YouTube Short every day to boost reach', impact: `+${Math.round(weeklyGrowthNeeded * 1.2)} subs est.` },
-    { week: 'Week 4', focus: 'Optimize all video titles and thumbnails for better CTR', impact: `+${Math.round(weeklyGrowthNeeded * 1.5)} subs est.` },
+  const roadmap = [
+    { week: 'Week 1', focus: `Post 2 trending ${niche} videos with strong thumbnails`, impact: `+${Math.round(weeklyGrowthNeeded * 0.8)} subs est.` },
+    { week: 'Week 2', focus: 'Engage daily in comments, reply to every comment within 1 hour', impact: `+${Math.round(weeklyGrowthNeeded)} subs est.` },
+    { week: 'Week 3', focus: 'Post 1 YouTube Short every day to boost channel reach', impact: `+${Math.round(weeklyGrowthNeeded * 1.2)} subs est.` },
+    { week: 'Week 4', focus: 'Optimize titles and thumbnails for best CTR, post at peak time', impact: `+${Math.round(weeklyGrowthNeeded * 1.5)} subs est.` },
   ];
-
-  try {
-    const text = await geminiRequest(prompt, 400);
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.roadmap && Array.isArray(parsed.roadmap)) roadmap = parsed.roadmap;
-    }
-  } catch(e) {
-    console.error('[Goal] Roadmap parse failed, using fallback:', e.message);
-  }
 
   return { estimatedWeeks, weeklyGrowthNeeded, avgWeeklyGrowth, roadmap, milestones };
 }
