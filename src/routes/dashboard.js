@@ -111,6 +111,8 @@ router.get('/plan', requirePremium, async (req, res) => {
     const forceRefresh = req.query.refresh === 'true';
 
     if (planSnap.exists && !forceRefresh) {
+      // Set cache headers for fast repeat loads
+      res.set('Cache-Control', 'private, max-age=3600');
       return res.json(planSnap.data());
     }
 
@@ -412,8 +414,22 @@ router.post('/task-guide', requirePremium, async (req, res) => {
     const lang     = profile.lang || 'Tamil';
     const channel  = userData.channel || {};
 
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const axios = require('axios');
+    const gemini = async (prompt, maxTokens=2500, retries=3) => {
+      for(let i=0;i<retries;i++){
+        try{
+          const r=await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
+            {contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:maxTokens,temperature:0.7}},
+            {timeout:60000}
+          );
+          return r.data.candidates[0].content.parts[0].text.trim();
+        }catch(err){
+          if(err.response?.status===429&&i<retries-1){await new Promise(r=>setTimeout(r,(i+1)*10000));}
+          else throw err;
+        }
+      }
+    };
 
     const isVideo  = task.type === 'video' || task.type === 'short';
     const isEngage = task.type === 'engage';
@@ -465,13 +481,7 @@ CRITICAL JSON RULES:
 
 Include 5-7 steps. For video: Pre-production, Hook/Intro, Main Content, Outro, Thumbnail, Upload.`;
 
-    const guideRes = await client.messages.create({
-      model:      'claude-sonnet-4-20250514',
-      max_tokens: 2500,
-      messages:   [{ role: 'user', content: guidePrompt }],
-    });
-
-    const guideText = guideRes.content[0].text.trim();
+    const guideText = await gemini(guidePrompt, 2500);
     const guide = safeParseJSON(guideText);
     if (!guide) throw new Error('Could not parse guide — Claude returned invalid JSON');
 
@@ -502,13 +512,7 @@ Generate a YouTube SEO package. IMPORTANT: Respond in valid JSON only. Do not us
 
 Rules: 15-20 tags mixing ${lang} and English, include year ${year}, no 2024 references.`;
 
-      const seoRes = await client.messages.create({
-        model:      'claude-sonnet-4-20250514',
-        max_tokens: 1500,
-        messages:   [{ role: 'user', content: seoPrompt }],
-      });
-
-      const seoText = seoRes.content[0].text.trim();
+      const seoText = await gemini(seoPrompt, 1500);
       seoContent = safeParseJSON(seoText);
     }
 
