@@ -1,22 +1,21 @@
 ```javascript
 // src/services/claude.js
-// Google Gemini AI Service (optimized + fixed)
+// Google Gemini AI Service
 
 const axios = require('axios');
 
-// BEST FREE MODEL FOR LOWER 429 ERRORS
 const GEMINI_MODEL = 'gemini-2.0-flash-lite';
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Delay helper
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Gemini Text Call
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 async function callGemini(prompt, maxTokens = 800) {
 
   const apiKey = process.env.GEMINI_API_KEY;
@@ -25,12 +24,10 @@ async function callGemini(prompt, maxTokens = 800) {
     throw new Error('Missing GEMINI_API_KEY in .env');
   }
 
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
   try {
 
-    // small delay to reduce rate-limit
     await sleep(1200);
 
     const res = await axios.post(
@@ -69,10 +66,9 @@ async function callGemini(prompt, maxTokens = 800) {
     console.error(
       '[Gemini Error]',
       err.response?.status,
-      JSON.stringify(err.response?.data || err.message, null, 2)
+      err.response?.data || err.message
     );
 
-    // Retry once for 429 errors
     if (err.response?.status === 429) {
 
       console.log('429 Rate Limit. Waiting 5 seconds...');
@@ -86,15 +82,18 @@ async function callGemini(prompt, maxTokens = 800) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Gemini Chat
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 async function callGeminiChat(systemPrompt, messages, maxTokens = 400) {
 
   const apiKey = process.env.GEMINI_API_KEY;
 
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  if (!apiKey) {
+    throw new Error('Missing GEMINI_API_KEY in .env');
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
   try {
 
@@ -142,7 +141,7 @@ async function callGeminiChat(systemPrompt, messages, maxTokens = 400) {
     console.error(
       '[Gemini Chat Error]',
       err.response?.status,
-      JSON.stringify(err.response?.data || err.message, null, 2)
+      err.response?.data || err.message
     );
 
     if (err.response?.status === 429) {
@@ -158,25 +157,24 @@ async function callGeminiChat(systemPrompt, messages, maxTokens = 400) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Fetch Google News Trends
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 async function fetchRealTrends(niche) {
 
   const now = new Date();
 
   const year = now.getFullYear();
 
-  const month =
-    now.toLocaleString('en-IN', { month: 'long' });
+  const month = now.toLocaleString('en-IN', {
+    month: 'long'
+  });
 
-  const searchTerm =
-    `${niche} India ${month} ${year}`;
+  const searchTerm = `${niche} India ${month} ${year}`;
 
   try {
 
-    const rssUrl =
-      `https://news.google.com/rss/search?q=${encodeURIComponent(searchTerm)}&hl=en-IN&gl=IN&ceid=IN:en`;
+    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(searchTerm)}&hl=en-IN&gl=IN&ceid=IN:en`;
 
     const response = await axios.get(rssUrl, {
       timeout: 8000,
@@ -205,7 +203,9 @@ async function fetchRealTrends(niche) {
         headlines.push(title);
       }
 
-      if (headlines.length >= 5) break;
+      if (headlines.length >= 5) {
+        break;
+      }
     }
 
     return {
@@ -229,23 +229,19 @@ async function fetchRealTrends(niche) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Weekly Plan
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 async function generateWeeklyPlan({
   channel,
-  profile,
-  snapshots
+  profile
 }) {
 
-  const niche =
-    profile?.niche || 'Tech';
+  const niche = profile?.niche || 'Tech';
 
-  const lang =
-    profile?.lang || 'Tamil';
+  const lang = profile?.lang || 'Tamil';
 
-  const trends =
-    await fetchRealTrends(niche);
+  const trends = await fetchRealTrends(niche);
 
   const prompt = `
 You are TubeCoach.
@@ -278,8 +274,7 @@ Return JSON only:
 
   const text = await callGemini(prompt, 600);
 
-  const jsonMatch =
-    text.match(/\{[\s\S]*\}/);
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
 
   if (!jsonMatch) {
     throw new Error('Weekly plan parse failed');
@@ -288,9 +283,9 @@ Return JSON only:
   return JSON.parse(jsonMatch[0]);
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Channel Analysis
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 async function generateAnalysis({
   channel,
   profile,
@@ -322,15 +317,14 @@ JSON only:
 
   const text = await callGemini(prompt, 300);
 
-  const jsonMatch =
-    text.match(/\{[\s\S]*\}/);
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
 
   return JSON.parse(jsonMatch[0]);
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Analyze Channel
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 async function analyzeChannel({
   channel,
   videos
@@ -355,15 +349,14 @@ JSON only:
 
   const text = await callGemini(prompt, 250);
 
-  const jsonMatch =
-    text.match(/\{[\s\S]*\}/);
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
 
   return JSON.parse(jsonMatch[0]);
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // AI Coach Chat
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 async function chatWithCoach({
   messages,
   user,
@@ -395,9 +388,9 @@ Keep answers practical and short.
   );
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Goal Timeline
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 async function estimateGoalTimeline({
   channel,
   profile
@@ -443,7 +436,6 @@ JSON only:
       text.match(/\{[\s\S]*\}/);
 
     if (jsonMatch) {
-
       roadmap =
         JSON.parse(jsonMatch[0]).roadmap || [];
     }
@@ -462,14 +454,14 @@ JSON only:
   };
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Export
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 module.exports = {
   generateWeeklyPlan,
   generateAnalysis,
   analyzeChannel,
   chatWithCoach,
-  estimateGoalTimeline,
+  estimateGoalTimeline
 };
 ```
