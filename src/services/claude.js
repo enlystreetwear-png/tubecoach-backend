@@ -3,7 +3,7 @@
 
 const axios = require('axios');
 
-const GEMINI_MODEL = 'gemini-1.5-flash';
+const GEMINI_MODEL = 'gemini-2.0-flash';
 
 async function callGemini(prompt, maxTokens = 2000) {
   const apiKey = process.env.GEMINI_API_KEY;
