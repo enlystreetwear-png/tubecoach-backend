@@ -4,7 +4,7 @@
 const express = require('express');
 const { requireAuth, requirePremium } = require('../middleware/auth');
 const { getChannelStats, getRecentVideos, saveWeeklySnapshot, getSnapshots } = require('../services/youtube');
-const { generateWeeklyPlan, generateAnalysis, analyzeChannel, chatWithCoach, estimateGoalTimeline } = require('../services/claude');
+const { generateWeeklyPlan, generateAnalysis, analyzeChannel, chatWithCoach, estimateGoalTimeline, generateTaskGuide } = require('../services/claude');
 const { getDb } = require('../config/firebase');
 
 const router = express.Router();
@@ -411,6 +411,41 @@ router.post('/task-guide', requirePremium, async (req, res) => {
     const niche    = profile.nicheDesc || profile.niche || 'content creation';
     const lang     = profile.lang || 'Tamil';
     const channel  = userData.channel || {};
+
+    const baiuGuide = await generateTaskGuide({
+      task: {
+        ...task,
+        niche,
+        lang,
+        prompt: `Create a TubeCoach task guide for ${task.title || task.name || 'this task'} in the ${niche} niche.`
+      },
+      channel,
+      profile,
+    });
+
+    const baiuGuideText = baiuGuide.task_guide || baiuGuide.guide || baiuGuide.answer || baiuGuide.reply || '';
+    const baiuResult = baiuGuide.steps ? baiuGuide : {
+      totalTime: baiuGuide.totalTime || '3-4 hours',
+      steps: [
+        {
+          stepNum: 1,
+          title: task.title || task.name || 'Complete the task',
+          timestamp: task.type === 'video' || task.type === 'short' ? '0:00 - 0:30' : 'Start',
+          duration: '30 min',
+          what: baiuGuideText || `Complete this task for your ${niche} channel.`,
+          script: baiuGuideText || `Explain the idea clearly in ${lang}.`,
+          onScreen: 'Show the main action or example clearly.',
+          tip: 'Keep it simple, specific, and useful for the viewer.'
+        }
+      ],
+      seoContent: baiuGuide.seoContent || null,
+    };
+
+    try {
+      await cacheRef.set({ ...baiuResult, cachedAt: new Date().toISOString() });
+    } catch(e) { console.error('[TaskGuide] Cache save failed:', e.message); }
+
+    return res.json(baiuResult);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });

@@ -1,12 +1,13 @@
 // src/services/claude.js
+// BaiuGPT provider adapter. The filename is kept for compatibility with existing routes.
 const axios = require("axios");
 
-const BAIUGPT_URL = process.env.BAIUGPT_URL;
+const BAIUGPT_URL = (process.env.BAIUGPT_URL || process.env.BAIUGPT_API_URL || "").replace(/\/$/, "");
 const BAIUGPT_API_KEY = process.env.BAIUGPT_API_KEY;
 
 async function callBaiuGPT(path, body, timeout = 120000) {
   if (!BAIUGPT_URL) {
-    throw new Error("BAIUGPT_URL is missing");
+    throw new Error("BAIUGPT_URL or BAIUGPT_API_URL is missing");
   }
 
   if (!BAIUGPT_API_KEY) {
@@ -19,13 +20,17 @@ async function callBaiuGPT(path, body, timeout = 120000) {
     {
       headers: {
         "Content-Type": "application/json",
-        "X-API-Key": BAIUGPT_API_KEY
+        "x-api-key": BAIUGPT_API_KEY
       },
       timeout
     }
   );
 
   return res.data;
+}
+
+function extractText(result) {
+  return result.reply || result.answer || result.task_guide || result.guide || "";
 }
 
 async function generateWeeklyPlan({ channel, profile, snapshots }) {
@@ -62,7 +67,7 @@ async function chatWithCoach({ messages, user, channel, profile, taskContext, ni
     lang
   });
 
-  return result.reply || result.answer || "";
+  return extractText(result);
 }
 
 async function estimateGoalTimeline({ channel, profile, snapshots }) {
