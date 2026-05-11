@@ -7,7 +7,8 @@ const https = require('https');
 
 // Keep-alive ping every 10 minutes to prevent Railway cold starts
 function keepAlive() {
-  const url = process.env.RAILWAY_PUBLIC_DOMAIN || 'tubecoach-backend-production.up.railway.app';
+  const url = process.env.RAILWAY_PUBLIC_DOMAIN;
+  if (!url) return;
   https.get('https://'+url+'/health', (res) => {
     console.log('[KeepAlive] Ping OK:', res.statusCode);
   }).on('error', () => {});
