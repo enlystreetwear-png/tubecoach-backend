@@ -15,7 +15,7 @@ function keepAlive() {
 }
 const { getDb } = require('../config/firebase');
 const { getChannelStats, getRecentVideos, saveWeeklySnapshot, getSnapshots } = require('../services/youtube');
-const { generateWeeklyPlan } = require('../services/claude');
+const { generateWeeklyPlan } = require('../services/ollama');
 
 function getWeekKey() {
   const d = new Date();
@@ -71,7 +71,7 @@ async function runWeeklyJob() {
         }
       }
 
-      // 2. Generate weekly plan with Claude
+      // 2. Generate weekly plan with Ollama
       const plan = await generateWeeklyPlan({
         channel:   channel || { title: 'Your Channel', subscribers: 0, totalViews: 0 },
         profile:   user.profile || {},

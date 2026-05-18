@@ -4,7 +4,7 @@
 const express = require('express');
 const { requireAuth, requirePremium } = require('../middleware/auth');
 const { getChannelStats, getRecentVideos, saveWeeklySnapshot, getSnapshots } = require('../services/youtube');
-const { generateWeeklyPlan, generateAnalysis, analyzeChannel, chatWithCoach, estimateGoalTimeline, generateTaskGuide } = require('../services/claude');
+const { generateWeeklyPlan, generateAnalysis, analyzeChannel, chatWithCoach, estimateGoalTimeline, generateTaskGuide } = require('../services/ollama');
 const { getDb } = require('../config/firebase');
 
 const router = express.Router();
@@ -13,7 +13,7 @@ const router = express.Router();
 router.use(requireAuth);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Safe JSON parser — handles Claude responses with special chars in strings
+// Safe JSON parser — handles AI responses with special chars in strings
 // ─────────────────────────────────────────────────────────────────────────────
 function safeParseJSON(text) {
   if (!text) return null;
@@ -137,7 +137,7 @@ router.get('/plan', requirePremium, async (req, res) => {
       }
     }
 
-    // Generate plan with Claude
+    // Generate plan with Ollama
     const plan = await generateWeeklyPlan({
       channel:   channel || { title: 'Your Channel', subscribers: 0, totalViews: 0 },
       profile:   userData.profile,
@@ -239,7 +239,7 @@ router.get('/analysis', requirePremium, async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /dashboard/chat
-// AI Coach chat — sends message history, returns Claude reply
+// AI Coach chat — sends message history, returns Ollama reply
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/chat', requirePremium, async (req, res) => {
   try {
@@ -315,7 +315,7 @@ router.get('/goal', requirePremium, async (req, res) => {
       timeline = cacheSnap.data();
       console.log(`[Goal] Returning cached roadmap for week ${weekKey}`);
     } else {
-      // Generate new roadmap with Claude
+      // Generate new roadmap with Ollama
       console.log(`[Goal] Generating new roadmap for week ${weekKey}`);
       const snapshots = await getSnapshots(uid, 4);
       timeline = await estimateGoalTimeline({
@@ -412,7 +412,7 @@ router.post('/task-guide', requirePremium, async (req, res) => {
     const lang     = profile.lang || 'Tamil';
     const channel  = userData.channel || {};
 
-    const baiuGuide = await generateTaskGuide({
+    const aiGuide = await generateTaskGuide({
       task: {
         ...task,
         niche,
@@ -423,138 +423,29 @@ router.post('/task-guide', requirePremium, async (req, res) => {
       profile,
     });
 
-    const baiuGuideText = baiuGuide.task_guide || baiuGuide.guide || baiuGuide.answer || baiuGuide.reply || '';
-    const baiuResult = baiuGuide.steps ? baiuGuide : {
-      totalTime: baiuGuide.totalTime || '3-4 hours',
+    const aiGuideText = aiGuide.task_guide || aiGuide.guide || aiGuide.answer || aiGuide.reply || '';
+    const aiResult = aiGuide.steps ? aiGuide : {
+      totalTime: aiGuide.totalTime || '3-4 hours',
       steps: [
         {
           stepNum: 1,
           title: task.title || task.name || 'Complete the task',
           timestamp: task.type === 'video' || task.type === 'short' ? '0:00 - 0:30' : 'Start',
           duration: '30 min',
-          what: baiuGuideText || `Complete this task for your ${niche} channel.`,
-          script: baiuGuideText || `Explain the idea clearly in ${lang}.`,
+          what: aiGuideText || `Complete this task for your ${niche} channel.`,
+          script: aiGuideText || `Explain the idea clearly in ${lang}.`,
           onScreen: 'Show the main action or example clearly.',
           tip: 'Keep it simple, specific, and useful for the viewer.'
         }
       ],
-      seoContent: baiuGuide.seoContent || null,
+      seoContent: aiGuide.seoContent || null,
     };
 
     try {
-      await cacheRef.set({ ...baiuResult, cachedAt: new Date().toISOString() });
+      await cacheRef.set({ ...aiResult, cachedAt: new Date().toISOString() });
     } catch(e) { console.error('[TaskGuide] Cache save failed:', e.message); }
 
-    return res.json(baiuResult);
-
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    const isVideo  = task.type === 'video' || task.type === 'short';
-    const isEngage = task.type === 'engage';
-    const isSeo    = task.type === 'seo';
-    const now      = new Date();
-    const year     = now.getFullYear();
-
-    // Step guide prompt
-    const guidePrompt = `You are TubeCoach. A YouTube creator makes ${niche} content in ${lang}. Channel: "${channel.title || 'New Channel'}".
-
-TASK: ${task.title}
-TASK TYPE: ${task.type}
-${task.detail ? 'CONTEXT: ' + task.detail : ''}
-${task.trendReason ? 'TREND: ' + task.trendReason : ''}
-
-Create a detailed step-by-step guide to complete this task.
-${isVideo ? `
-For this VIDEO task include:
-- Complete script with EXACT words to say on camera in ${lang}
-- What to show on screen at each moment
-- Timestamps for each section (0:00-0:30 etc.)
-- Thumbnail concept description` : ''}
-${isSeo ? 'Include specific keywords, tags, and exact text to copy-paste.' : ''}
-${isEngage ? 'Include exactly what to comment or post, word for word.' : ''}
-
-CRITICAL JSON RULES:
-- Respond with valid JSON only — no markdown, no code fences, no backticks
-- Never use double quotes inside string values — use single quotes instead
-- Never use actual newlines inside string values — write everything on one line per field
-- Keep script and onScreen as single sentences, not multi-line paragraphs
-- If a field does not apply, use the string "null" not the value null
-- All URLs must be real, working websites — only use well-known platforms
-
-{
-  "totalTime": "3-4 hours",
-  "steps": [
-    {
-      "stepNum": 1,
-      "title": "Step title here",
-      "timestamp": "0:00 - 0:30",
-      "duration": "20 min",
-      "what": "Exactly what to do in this step in one clear sentence",
-      "script": "What to say on camera in one paragraph in ${lang}",
-      "onScreen": "What to show on screen in one sentence",
-      "tip": "One pro tip in one sentence"
-    }
-  ]
-}
-
-Include 5-7 steps. For video: Pre-production, Hook/Intro, Main Content, Outro, Thumbnail, Upload.`;
-
-    const guideRes = await client.messages.create({
-      model:      'claude-sonnet-4-20250514',
-      max_tokens: 2500,
-      messages:   [{ role: 'user', content: guidePrompt }],
-    });
-
-    const guideText = guideRes.content[0].text.trim();
-    const guide = safeParseJSON(guideText);
-    if (!guide) throw new Error('Could not parse guide — Claude returned invalid JSON');
-
-    // For video/short tasks: also generate full SEO content
-    let seoContent = null;
-    if (isVideo) {
-      const videoTitle = task.title.replace(/^Post:\s*/i, '').replace(/^Create:\s*/i, '');
-      const seoPrompt = `You are a YouTube SEO expert for Indian ${lang} creators making ${niche} content.
-
-VIDEO TITLE: "${videoTitle}"
-CHANNEL: "${channel.title || 'New Channel'}"
-LANGUAGE: ${lang}
-YEAR: ${year}
-
-Generate a YouTube SEO package. IMPORTANT: Respond in valid JSON only. Do not use double quotes inside string values — use single quotes instead. No newlines inside string values.
-
-{
-  "title": {
-    "option1": "catchy SEO title under 70 chars",
-    "option2": "alternative angle title under 70 chars",
-    "option3": "short punchy title under 50 chars"
-  },
-  "description": "500 word description with timestamps, keywords, call to action. No line breaks.",
-  "tags": ["tag1", "tag2", "tag3"],
-  "thumbnailConcept": "thumbnail design description",
-  "firstComment": "pinned comment to post after upload"
-}
-
-Rules: 15-20 tags mixing ${lang} and English, include year ${year}, no 2024 references.`;
-
-      const seoRes = await client.messages.create({
-        model:      'claude-sonnet-4-20250514',
-        max_tokens: 1500,
-        messages:   [{ role: 'user', content: seoPrompt }],
-      });
-
-      const seoText = seoRes.content[0].text.trim();
-      seoContent = safeParseJSON(seoText);
-    }
-
-    const result = { ...guide, seoContent };
-
-    // Save to Firestore cache — repeat clicks load instantly
-    try {
-      await cacheRef.set({ ...result, cachedAt: new Date().toISOString() });
-    } catch(e) { console.error('[TaskGuide] Cache save failed:', e.message); }
-
-    res.json(result);
+    return res.json(aiResult);
 
   } catch (err) {
     console.error('Task guide error:', err.message);

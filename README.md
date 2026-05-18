@@ -20,7 +20,7 @@ tubecoach-backend/
 │   │   ├── dashboard.js         ← Plan, Analysis, Chat, Goal endpoints
 │   │   └── payment.js           ← Razorpay ₹499/month subscription
 │   ├── services/
-│   │   ├── claude.js            ← All Claude API calls (plan, chat, analysis)
+│   │   ├── ollama.js            ← Ollama AI calls (plan, chat, analysis)
 │   │   └── youtube.js           ← YouTube Data API v3 calls
 │   └── cron/
 │       └── weeklyJob.js         ← Auto-runs every Monday 6 AM IST
@@ -100,7 +100,9 @@ cp .env.example .env
 Then open `.env` and fill in all values:
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-your-key-here
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=llama3:latest
+OLLAMA_TIMEOUT_MS=120000
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 GOOGLE_REDIRECT_URI=http://localhost:4000/auth/google/callback
@@ -219,7 +221,7 @@ This runs the Monday job immediately — useful for testing without waiting.
 | Railway backend | ~$5 (free tier) |
 | Firebase Firestore | Free (under limits) |
 | YouTube Data API | Free (10,000 units/day) |
-| Claude API | ~₹2,000-3,000 (depends on usage) |
+| Ollama AI | Free locally, aside from your computer/server cost |
 | Razorpay | 2% per transaction |
 | **Revenue at 100 users** | **₹49,900/month** |
 
@@ -230,5 +232,5 @@ This runs the Monday job immediately — useful for testing without waiting.
 - Google OAuth issues → https://console.cloud.google.com/apis/credentials
 - Firebase issues → https://console.firebase.google.com
 - Razorpay issues → https://dashboard.razorpay.com
-- Claude API → https://console.anthropic.com
+- Ollama setup → https://ollama.com
 # force redeploy Fri Apr 24 17:08:13 IST 2026
