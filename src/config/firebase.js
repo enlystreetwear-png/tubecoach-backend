@@ -6,11 +6,21 @@ const admin = require('firebase-admin');
 let db = null;
 
 function normalizePrivateKey(key) {
-  return (key || '')
+  let normalized = (key || '')
     .trim()
     .replace(/^["']|["']$/g, '')
     .replace(/\\\\n/g, '\n')
     .replace(/\\n/g, '\n');
+
+  // Repair common manual .env paste mistakes:
+  // - BEGIN line followed by "nMII..." instead of "\nMII..."
+  // - literal backslashes left at the end of PEM lines
+  normalized = normalized
+    .replace(/(-----BEGIN PRIVATE KEY-----)n/g, '$1\n')
+    .replace(/\\\n/g, '\n')
+    .replace(/\\$/gm, '');
+
+  return normalized;
 }
 
 function initFirebase() {
