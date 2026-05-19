@@ -40,6 +40,17 @@ function taskTopic(taskContext, fallback) {
     .replace(/^(Create|Short|Package):\s*/i, "");
 }
 
+function requestIntent(question) {
+  const q = clean(question).toLowerCase();
+  if (/(script|voiceover|voice over|dialogue|speak)/.test(q)) return "script";
+  if (/(title|headline|name my video)/.test(q)) return "titles";
+  if (/(thumbnail|thumb|cover)/.test(q)) return "thumbnail";
+  if (/(seo|tags|description|keyword)/.test(q)) return "seo";
+  if (/(hook|intro|opening|first 10)/.test(q)) return "hooks";
+  if (/(plan|schedule|roadmap|grow|growth)/.test(q)) return "plan";
+  return "coach";
+}
+
 function nicheTrends(niche) {
   const lower = niche.toLowerCase();
   if (lower.includes("tech") || lower.includes("review")) {
@@ -97,8 +108,10 @@ async function postOllama(payload, timeout = OLLAMA_TIMEOUT_MS) {
         model: OLLAMA_MODEL,
         stream: false,
         options: {
-          temperature: 0.65,
-          top_p: 0.9,
+          temperature: 0.35,
+          top_p: 0.85,
+          repeat_penalty: 1.12,
+          num_predict: 900,
         },
         ...payload,
       }),
@@ -133,15 +146,106 @@ async function askOllama({ system, messages, prompt, json = false, timeout }) {
 
 function coachSystem({ niche, lang, channel, taskContext }) {
   return [
-    "You are TubeCoach AI, a practical YouTube growth coach.",
-    "Answer like a high-quality local AI assistant: specific, useful, and ready to act on.",
+    "You are TubeCoach AI, a practical YouTube growth coach for small and growing creators.",
+    "Your job is to produce the exact useful result the creator asked for, not a general article.",
     "Do not mention internal provider names.",
-    "Give concrete scripts, titles, thumbnail ideas, SEO text, and step-by-step plans when useful.",
+    "Give concrete scripts, titles, thumbnail ideas, SEO text, hooks, and step-by-step plans when useful.",
     "Keep responses focused on the creator's task and avoid generic motivational filler.",
+    "Do not invent specific brands, phone models, prices, statistics, or claims unless the user provided them.",
+    "When facts are unknown, give a test/checklist the creator can film instead of pretending you tested it.",
+    "If the creator asks for a script, write exact words to say on camera with timestamps.",
+    "If the creator asks for titles, give 5 strong title options and pick the best one.",
+    "If the creator asks for a thumbnail, describe the layout, text, subject, and visual proof.",
+    "If the creator asks for SEO, give title, description, tags, and pinned comment.",
+    "If the creator asks how to grow, give a 7-day action plan tied to their niche.",
+    "Use short sections and numbered steps. Do not write long essays.",
+    "Never answer with vague advice like 'be consistent' unless you also give the exact action.",
     `Creator niche: ${niche}.`,
     `Language preference: ${lang}.`,
     `Channel context: ${JSON.stringify(channel || {})}.`,
     `Current task: ${JSON.stringify(taskContext || {})}.`,
+  ].join("\n");
+}
+
+function coachPrompt({ messages, profile, taskContext, niche, lang, channel }) {
+  const latest = latestUserMessage(messages);
+  const intent = requestIntent(latest);
+  const topic = taskTopic(taskContext, latest || profileNiche(profile));
+  const trends = nicheTrends(niche);
+  const formats = {
+    script: [
+      "Required output format for this script:",
+      "1. Video angle: one sentence",
+      "2. 0:00 Hook: exact words to say, result first, no greeting",
+      "3. 0:10 Setup: exact words to say",
+      "4. 0:30 Proof/Test 1: exact words plus what to show",
+      "5. 1:15 Proof/Test 2: exact words plus what to show",
+      "6. 2:00 Verdict: exact words to say",
+      "7. Short clip: one 20-45 second clip idea",
+      "8. Next action: one sentence",
+    ],
+    titles: [
+      "Required output format for titles:",
+      "1. 5 title options under 70 characters",
+      "2. Best pick",
+      "3. Why it should get clicks",
+    ],
+    thumbnail: [
+      "Required output format for thumbnail:",
+      "1. Main visual",
+      "2. Text on thumbnail, max 4 words",
+      "3. Layout",
+      "4. What not to add",
+    ],
+    seo: [
+      "Required output format for SEO:",
+      "1. SEO title",
+      "2. Description",
+      "3. 15 tags",
+      "4. Pinned comment",
+    ],
+    hooks: [
+      "Required output format for hooks:",
+      "1. 7 hook options",
+      "2. Best hook",
+      "3. First shot to show",
+    ],
+    plan: [
+      "Required output format for growth plan:",
+      "1. Today",
+      "2. This week",
+      "3. Next upload",
+      "4. What metric to check",
+    ],
+    coach: [
+      "Required output format:",
+      "1. Direct answer",
+      "2. Exact next steps",
+      "3. Copy-paste text or checklist",
+      "4. One next action",
+    ],
+  };
+
+  return [
+    `Latest creator request: ${latest || "Give me a useful YouTube growth answer."}`,
+    `Detected request type: ${intent}`,
+    `Selected task/topic: ${topic}`,
+    `Creator niche: ${niche}`,
+    `Language to use: ${lang}`,
+    `Channel: ${JSON.stringify(channel || {})}`,
+    `Profile: ${JSON.stringify(profile || {})}`,
+    `Relevant topic angles: ${trends.join("; ")}`,
+    "",
+    "Answer requirements:",
+    "- Start directly with the result. No greeting.",
+    "- Make the answer specific to the selected task/topic.",
+    "- Do not mention unrelated examples.",
+    "- Do not use old or random device/product examples unless asked.",
+    "- Include copy-paste ready text where possible.",
+    "- Keep it practical for a YouTube creator.",
+    "- End with one next action.",
+    "",
+    ...formats[intent],
   ].join("\n");
 }
 
@@ -259,12 +363,20 @@ Shape:
 async function chatWithCoach({ messages, user, channel, profile, taskContext, niche, lang }) {
   const finalNiche = clean(niche, profileNiche(profile));
   const finalLang = clean(lang, profileLang(profile));
-  const promptMessages = recentMessages(messages);
+  const promptMessages = recentMessages(messages).slice(0, -1);
 
   try {
     return await askOllama({
       system: coachSystem({ niche: finalNiche, lang: finalLang, channel, taskContext, user }),
       messages: promptMessages,
+      prompt: coachPrompt({
+        messages,
+        profile,
+        taskContext,
+        niche: finalNiche,
+        lang: finalLang,
+        channel,
+      }),
     });
   } catch (err) {
     console.warn("[Ollama] Coach failed:", err.message);
