@@ -101,7 +101,7 @@ Then open `.env` and fill in all values:
 
 ```env
 OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=llama3:latest
+OLLAMA_MODEL=llama3.1:8b
 OLLAMA_TIMEOUT_MS=120000
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
